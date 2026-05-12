@@ -1,0 +1,7 @@
+{
+    "_comment": "Copy this file to vae_train_stage2.local.json and edit.",
+
+    "custom_config": {
+        "output_dir": "/absolute/path/to/experiment/output/"
+    }
+}

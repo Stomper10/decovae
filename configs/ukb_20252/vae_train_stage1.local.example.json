@@ -1,0 +1,7 @@
+{
+    "_comment": "Copy this file to vae_train_stage1.local.json and edit. Any key here deep-merges onto vae_train_stage1.json at load time.",
+
+    "custom_config": {
+        "output_dir": "/absolute/path/to/experiment/output/"
+    }
+}

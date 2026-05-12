@@ -1,0 +1,36 @@
+# Build artifacts and caches
+__pycache__/
+*.pyc
+*.pyo
+*.tmp
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Training artifacts
+wandb/
+weights/
+outputs/
+logs/
+
+# Local-only directories
+outdated/
+_analysis/
+*.pdf
+*.eps
+
+# Local overrides (per-user configuration; never commit)
+env.local.sh
+*.local.json
+.env
+.envrc
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

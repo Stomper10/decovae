@@ -1,0 +1,11 @@
+{
+    "_comment": "Copy this file to dataset.local.json and edit the values to match your environment. dataset.local.json is gitignored. Any key set here deep-merges on top of dataset.json at load time, so only include the keys you actually want to override.",
+
+    "wandb_entity": "your-wandb-entity-or-username",
+
+    "data_dir": "/absolute/path/to/UKB/imaging/",
+    "train_label_dir": "/absolute/path/to/train.csv",
+    "valid_label_dir": "/absolute/path/to/valid.csv",
+
+    "feature_extractor_path": "/absolute/path/to/RadImageNet-ResNet50_notop.pth"
+}
