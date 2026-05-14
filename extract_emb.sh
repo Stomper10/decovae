@@ -6,13 +6,13 @@
 # === SBATCH options below are cluster-specific. Edit for your cluster, =====
 # === or override at submission time. ========================================
 #SBATCH --job-name=extract_emb
+#SBATCH --account=gpu
+#SBATCH --partition=gpu-4farm
 #SBATCH --nodes=1
-#SBATCH --gres=gpu:4
-#SBATCH --partition=P2
-#SBATCH --time=0-12:00:00
-#SBATCH --exclude=b00,b06,b07,b08,b09,b12,b15,b24,b30
-#SBATCH --mem=200GB
-#SBATCH --cpus-per-task=32
+#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:h100:4
+#SBATCH --cpus-per-task=56
+#SBATCH --time=08:00:00
 #SBATCH --open-mode=append
 #SBATCH -o /dev/null
 
@@ -35,12 +35,12 @@ fi
 # ======================================================================
 # EXPERIMENT CONFIG — edit here, or override at sbatch time via env vars
 # ======================================================================
-: "${EXP_NAME:=vad1e1}"
+: "${EXP_NAME:=vad1e-0}"
 : "${STAGE:=stage1}"   # which VAE stage's checkpoint to encode embeddings from
 : "${STAGE_ROOT:=${OUTPUT_ROOT:-./outputs/ukb_20252}/${STAGE}}"
 : "${WORK_DIR:=${STAGE_ROOT}/${EXP_NAME}}"
 : "${DATA_DIR:=./data/imaging}"
-: "${CKPT:=${WORK_DIR}/weights/vae/checkpoint-40000/model.pt}"
+: "${CKPT:=${WORK_DIR}/weights/vae/checkpoint-100000/model.pt}"
 : "${TRAIN_CSV:=./data/train.csv}"
 : "${VALID_CSV:=./data/valid.csv}"
 : "${STAGES:=extract,geometry,stat}" # extract,geometry,stat

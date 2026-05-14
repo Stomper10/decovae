@@ -6,15 +6,13 @@
 # === SBATCH options below are cluster-specific. Edit for your cluster, =====
 # === or override at submission time. ========================================
 #SBATCH --job-name=compute_metric
+#SBATCH --account=gpu
+#SBATCH --partition=gpu-4farm
 #SBATCH --nodes=1
-#SBATCH --gpus-per-node=4
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=32
-#SBATCH --partition=P2
-#SBATCH --exclude=b00,b06,b07,b08,b09,b12,b15,b24,b30
-#SBATCH --time=0-12:00:00
-#SBATCH --mem=200GB
-#SBATCH --signal=B:SIGUSR1@30
+#SBATCH --gres=gpu:h100:4
+#SBATCH --cpus-per-task=56
+#SBATCH --time=04:00:00
 #SBATCH -o /dev/null
 #SBATCH --open-mode=append
 
@@ -108,6 +106,8 @@ srun --cpu-bind=none,v --accel-bind=g torchrun \
       --postfix "${POSTFIX}" \
       --base_label_dir "${BASE_CSV}" \
       --other_label_dir "${OTHER_CSV}" \
+      --data_dir "${DATA_DIR}" \
+      --feature_extractor_path "${FEATURE_EXTRACTOR_PATH}" \
       --save_volume \
       --save_real &
 wait

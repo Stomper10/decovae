@@ -33,11 +33,11 @@ not on a SLURM cluster.
 ```
 .
 ├── configs/ukb_20252/        # public config templates (paths are null;
-│                             #   fill in via *.local.json overrides)
+│                             #   fill in via env.local.sh + launcher CLI args)
 ├── datasets/                 # pluggable dataset-adapter interface
 ├── patches/                  # MONAI subclasses (Apache-2.0 derivative work)
 ├── scripts/                  # transforms, utilities, DDP helpers
-│   ├── config_utils.py       # load_json_with_local() — drives the override
+│   ├── config_utils.py       # load_json() — JSON config loader
 │   ├── transforms.py
 │   ├── utils.py
 │   └── …
@@ -75,45 +75,26 @@ pip install -r requirements.txt
 ResNet-50 backbone for the FID feature extractor. Download
 `RadImageNet-ResNet50_notop.pth` (a [Google Drive
 mirror](https://drive.google.com/uc?export=download&id=1VOWHgOq0rm7OkE_JxlWXhMAH4CvcXUHT)
-is currently available) and set the absolute path in your
-`configs/ukb_20252/dataset.local.json` under `feature_extractor_path`. See the
-upstream repo for the original distribution and license terms.
+is currently available) and set the absolute path in your `env.local.sh` as
+`FEATURE_EXTRACTOR_PATH=...`. See the upstream repo for the original
+distribution and license terms.
 
-## Per-user configuration
+## Per-user configuration — `env.local.sh`
 
 The repo ships with **public** config templates that have all environment- and
-account-specific values nulled out. You provide your local values via two
-gitignored override files:
-
-### 1. Shell environment — `env.local.sh`
-
-Sourced by every `*.sh` launcher to set conda activation, TMPDIR, default
-experiment paths, and W&B entity.
+account-specific values nulled out (`data_dir`, `train_label_dir`,
+`valid_label_dir`, `wandb_entity`, `feature_extractor_path`). All per-user
+values live in a single gitignored shell file.
 
 ```bash
 cp env.local.example.sh env.local.sh
-# edit env.local.sh: uncomment / fill in conda activate, OUTPUT_DIR_BASE,
-# DATA_DIR, TRAIN_CSV, VALID_CSV, WANDB_ENTITY, …
+# edit env.local.sh: uncomment / fill in conda activate, OUTPUT_ROOT,
+# DATA_DIR, TRAIN_CSV, VALID_CSV, WANDB_ENTITY, FEATURE_EXTRACTOR_PATH, …
 ```
 
-### 2. JSON configs — `*.local.json`
-
-Each `configs/.../*.json` will deep-merge a sibling `*.local.json` on top of
-itself at load time. The `.local.json` files are gitignored. Templates with
-the keys you need to fill in are shipped as `*.local.example.json`:
-
-```bash
-cp configs/ukb_20252/dataset.local.example.json \
-   configs/ukb_20252/dataset.local.json
-# edit configs/ukb_20252/dataset.local.json — wandb_entity, data_dir,
-# train/valid CSVs, feature_extractor_path
-
-cp configs/ukb_20252/vae_train_stage1.local.example.json \
-   configs/ukb_20252/vae_train_stage1.local.json
-# edit custom_config.output_dir
-```
-
-Anything not overridden in the `.local.json` keeps the public default.
+Each `*.sh` launcher sources `env.local.sh` and forwards the values to its
+Python entry point as CLI flags (`--data_dir "${DATA_DIR}"`, etc.), so the
+public JSON configs in `configs/ukb_20252/` never need to be edited.
 
 ## SLURM launchers
 

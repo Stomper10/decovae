@@ -9,6 +9,10 @@
 # extract_emb.sh launcher. All variables defined here become defaults for the
 # `${VAR:=default}` expansion further down in those scripts, so you do not
 # need to edit the launchers themselves to switch environments.
+#
+# Per-user paths defined here are forwarded to Python entry points as CLI
+# arguments by the launchers (e.g. DATA_DIR -> --data_dir). The base JSON
+# configs in configs/<dataset>/ ship with `null` placeholders for these keys.
 
 # --- Shell initialization & conda env ---------------------------------------
 # source ~/.bashrc
@@ -31,12 +35,17 @@
 # (e.g. ${OUTPUT_ROOT}/stage1). Override STAGE per-invocation:
 #   STAGE=stage2 sbatch train_VAE.sh
 # export OUTPUT_ROOT=./outputs/ukb_20252          # experiments live under <OUTPUT_ROOT>/<STAGE>/<EXP_NAME>/
-# export DATA_DIR=/path/to/UKB/imaging            # raw image volumes
-# export TRAIN_CSV=/path/to/train.csv             # subject metadata + label
-# export VALID_CSV=/path/to/valid.csv
+# export DATA_DIR=/path/to/UKB/imaging            # raw image volumes  (-> --data_dir)
+# export TRAIN_CSV=/path/to/train.csv             # subject metadata + label  (-> --train_label_dir)
+# export VALID_CSV=/path/to/valid.csv             # (-> --valid_label_dir)
 # export CODE_DIR="$(pwd)"                        # repository root (extract_emb only)
 
 # --- W&B (optional) ----------------------------------------------------------
 # Set your Weights & Biases entity (team or user).
 # Leave unset to disable W&B logging or run in offline mode.
-# export WANDB_ENTITY=your-wandb-entity
+# export WANDB_ENTITY=your-wandb-entity            # (-> --wandb_entity)
+
+# --- Metric / FID feature extractor -----------------------------------------
+# RadImageNet checkpoint used by compute_metric.sh for 2.5D FID.
+# Download once and point to the .pth file. (-> --feature_extractor_path)
+# export FEATURE_EXTRACTOR_PATH=/path/to/RadImageNet-ResNet50_notop.pth

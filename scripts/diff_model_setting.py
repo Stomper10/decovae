@@ -20,7 +20,7 @@ import torch
 import torch.distributed as dist
 from monai.utils import RankFilter
 
-from scripts.config_utils import load_json_with_local
+from scripts.config_utils import load_json
 
 
 def setup_logging(logger_name: str = "") -> logging.Logger:
@@ -58,11 +58,11 @@ def load_config(env_config_path: str, model_config_path: str, model_def_path: st
     """
     args = argparse.Namespace()
 
-    for k, v in load_json_with_local(env_config_path).items():
+    for k, v in load_json(env_config_path).items():
         setattr(args, k, v)
-    for k, v in load_json_with_local(model_config_path).items():
+    for k, v in load_json(model_config_path).items():
         setattr(args, k, v)
-    for k, v in load_json_with_local(model_def_path).items():
+    for k, v in load_json(model_def_path).items():
         setattr(args, k, v)
 
     return args

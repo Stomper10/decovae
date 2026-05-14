@@ -34,7 +34,7 @@ from monai.data import CacheDataset, DataLoader, DistributedSampler
 from monai.networks.schedulers.ddpm import DDPMPredictionType
 from monai.networks.schedulers.rectified_flow import RFlowScheduler
 
-from scripts.config_utils import load_json_with_local
+from scripts.config_utils import load_json
 from scripts.utils import define_instance, count_parameters
 from datasets import get_adapter
 import patches  # noqa: F401  # registers DiffusionModelUNetMaisiV2 / RFlowSchedulerV2 for ConfigParser
@@ -114,6 +114,8 @@ def load_config():
     parser.add_argument("--no_amp", dest="amp", action="store_false")
     parser.add_argument("--output_dir", type=str, default=None,
                         help="Stage base directory. Required (passed by launcher).")
+    parser.add_argument("--wandb_entity", type=str, default=None,
+                        help="W&B entity. Overrides dataset.wandb_entity.")
     args = parser.parse_args()
 
     if args.resume and not args.run_name:
@@ -122,14 +124,14 @@ def load_config():
 
     cli_overrides = {k: v for k, v in vars(args).items() if v is not None}
 
-    dataset_dict = load_json_with_local(args.dataset_config_path)
+    dataset_dict = load_json(args.dataset_config_path)
     for k, v in dataset_dict.items():
         setattr(args, k, v)
 
-    model_config_dict = load_json_with_local(args.model_config_path)
+    model_config_dict = load_json(args.model_config_path)
     for k, v in model_config_dict.items():
         setattr(args, k, v)
-    train_config_dict = load_json_with_local(args.train_config_path)
+    train_config_dict = load_json(args.train_config_path)
     for k, v in train_config_dict["diffusion_unet_inference"].items():
         setattr(args, k, v)
     for k, v in train_config_dict["diffusion_unet_train"].items():

@@ -16,9 +16,9 @@ Image paths must be deep enough that ``path.split("/")[4]`` is the
 eid directory (e.g. ``/.../<eid>_20252_2_0/T1/T1_brain_to_MNI.nii.gz``).
 See ``extract_subject_id`` for the exact slicing logic.
 
-Use ``configs/ukb_20252/dataset.json`` (with a per-user
-``dataset.local.json`` for ``data_dir`` / CSV paths) to point at your
-local UKB extract.
+Use ``configs/ukb_20252/dataset.json`` for adapter-level constants; per-user
+``data_dir`` / CSV paths are sourced from ``env.local.sh`` and forwarded by
+each launcher as ``--data_dir`` / ``--train_label_dir`` / ``--valid_label_dir``.
 """
 from __future__ import annotations
 

@@ -34,7 +34,7 @@ from monai.networks.nets import PatchDiscriminator
 from monai.losses import PatchAdversarialLoss, PerceptualLoss
 from monai.data import CacheDataset, DataLoader, DistributedSampler
 
-from scripts.config_utils import load_json_with_local
+from scripts.config_utils import load_json
 from scripts.transforms import VAE_Transform
 from scripts.utils import define_instance, dynamic_infer, count_parameters
 from scripts.utils_plot import find_label_center_loc, get_xyz_plot
@@ -207,6 +207,15 @@ def load_config():
                         help="Target per-channel variance for the variance penalty.")
     parser.add_argument("--output_dir", type=str, default=None,
                         help="Stage base directory. If set, overrides custom_config.output_dir from JSON.")
+    # Per-user paths / identity. Passed by launcher from env.local.sh; if unset, dataset.json values (typically null) win.
+    parser.add_argument("--data_dir", type=str, default=None,
+                        help="Source NIfTI dir. Overrides dataset.data_dir.")
+    parser.add_argument("--train_label_dir", type=str, default=None,
+                        help="train.csv path. Overrides dataset.train_label_dir.")
+    parser.add_argument("--valid_label_dir", type=str, default=None,
+                        help="valid.csv path. Overrides dataset.valid_label_dir.")
+    parser.add_argument("--wandb_entity", type=str, default=None,
+                        help="W&B entity. Overrides dataset.wandb_entity.")
     args = parser.parse_args()
 
     if args.resume and not args.run_name:
@@ -216,14 +225,14 @@ def load_config():
     # CLI에서 받은 값 보존 -> JSON merge가 덮어쓰지 못하게 한다.
     cli_overrides = {k: v for k, v in vars(args).items() if v is not None}
 
-    dataset_dict = load_json_with_local(args.dataset_config_path)
+    dataset_dict = load_json(args.dataset_config_path)
     for k, v in dataset_dict.items():
         setattr(args, k, v)
 
-    config_dict = load_json_with_local(args.model_config_path)
+    config_dict = load_json(args.model_config_path)
     for k, v in config_dict.items():
         setattr(args, k, v)
-    config_train_dict = load_json_with_local(args.train_config_path)
+    config_train_dict = load_json(args.train_config_path)
     for k, v in config_train_dict["data_option"].items():
         setattr(args, k, v)
     for k, v in config_train_dict["autoencoder_train"].items():

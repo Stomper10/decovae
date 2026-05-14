@@ -11,15 +11,15 @@
 # === SBATCH options below are cluster-specific. Edit for your cluster, =====
 # === or override at submission time (e.g. `sbatch -p mypart train_VAE.sh`). =
 #SBATCH --job-name=train_VAE
-#SBATCH --nodes=2
-#SBATCH --gpus-per-node=4
+#SBATCH --account=gpu
+#SBATCH --partition=gpu-8farm
+#SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=64
-#SBATCH --partition=P2
-#SBATCH --exclude=b00,b06,b07,b08,b09,b12,b15,b24,b30
-#SBATCH --time=0-12:00:00
-#SBATCH --mem=200GB
-#SBATCH --signal=B:SIGUSR1@180
+#SBATCH --gres=gpu:h100:8
+#SBATCH --cpus-per-task=112
+#SBATCH --time=1-00:00:00
+#SBATCH --signal=B:SIGUSR1@300
+#SBATCH --requeue
 #SBATCH -o /dev/null
 #SBATCH --open-mode=append
 
@@ -42,15 +42,15 @@ fi
 # ======================================================================
 # EXPERIMENT CONFIG — edit here, or override at sbatch time via --export
 # ======================================================================
-: "${EXP_NAME:=vad1e1}"
+: "${EXP_NAME:=vad1e-0}"
 : "${STAGE:=stage1}"   # switch stages with: STAGE=stage2 sbatch train_VAE.sh
 : "${DATASET_CFG:=configs/ukb_20252/dataset.json}"
 : "${MODEL_CFG:=configs/ukb_20252/model_fm.json}"
 : "${TRAIN_CFG:=configs/ukb_20252/vae_train_${STAGE}.json}"
 : "${OUTPUT_DIR_BASE:=${OUTPUT_ROOT:-./outputs/ukb_20252}/${STAGE}}"
-: "${LAMBDA_COV:=10.0}"
+: "${LAMBDA_COV:=1.0}"
 : "${LAMBDA_COR:=0.0}"
-: "${LAMBDA_VAR:=10.0}"
+: "${LAMBDA_VAR:=1.0}"
 : "${TARGET_VAR:=1.0}"
 : "${RESUME:=1}"   # 1 = pass --resume, 0 = fresh start
 
@@ -73,7 +73,8 @@ export OMP_NUM_THREADS=1
 
 echo "UKB - Starting unified MAISI VAE MULTI-NODE DDP training..."
 echo "  job_name   : ${EXP_NAME}"
-echo "  nodes      : ${SLURM_NNODES}  gpus_per_node : 4"
+NPROC_PER_NODE="${SLURM_GPUS_ON_NODE:-8}"
+echo "  nodes      : ${SLURM_NNODES}  gpus_per_node : ${NPROC_PER_NODE}"
 echo "  master     : ${MASTER_ADDR}:${MASTER_PORT}"
 echo "  dataset_cfg: ${DATASET_CFG}"
 echo "  model_cfg  : ${MODEL_CFG}"
@@ -113,7 +114,7 @@ if [[ "${RESUME}" == "1" ]]; then
 fi
 
 srun --cpu-bind=none,v --accel-bind=g torchrun \
-    --nproc_per_node=4 \
+    --nproc_per_node=${NPROC_PER_NODE} \
     --nnodes=$SLURM_NNODES \
     --node_rank=$SLURM_NODEID \
     --rdzv_id=$SLURM_JOB_ID \
@@ -124,6 +125,10 @@ srun --cpu-bind=none,v --accel-bind=g torchrun \
       --model_config_path "${MODEL_CFG}" \
       --train_config_path "${TRAIN_CFG}" \
       --output_dir "${OUTPUT_DIR_BASE}" \
+      --data_dir "${DATA_DIR}" \
+      --train_label_dir "${TRAIN_CSV}" \
+      --valid_label_dir "${VALID_CSV}" \
+      --wandb_entity "${WANDB_ENTITY}" \
       --run_name "${EXP_NAME}" \
       --cpus_per_task "${SLURM_CPUS_PER_TASK}" \
       --lambda_cov "${LAMBDA_COV}" \

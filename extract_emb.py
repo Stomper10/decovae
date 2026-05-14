@@ -38,7 +38,7 @@ import torch.distributed as dist
 import monai
 from monai.transforms import Compose
 
-from scripts.config_utils import load_json_with_local
+from scripts.config_utils import load_json
 from scripts.diff_model_setting import initialize_distributed, load_config, setup_logging
 from scripts.utils import define_instance
 from datasets import get_adapter
@@ -77,7 +77,7 @@ def parse_args() -> argparse.Namespace:
 
     # Merge dataset config into args; CLI overrides win.
     cli_overrides = {k: v for k, v in vars(args).items() if v is not None}
-    dataset_dict = load_json_with_local(args.dataset_config_path)
+    dataset_dict = load_json(args.dataset_config_path)
     for k, v in dataset_dict.items():
         setattr(args, k, v)
     for k, v in cli_overrides.items():

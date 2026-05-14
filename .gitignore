@@ -18,10 +18,12 @@ outdated/
 _analysis/
 *.pdf
 *.eps
+guide/
+journal_plan/
+csv_files/
 
 # Local overrides (per-user configuration; never commit)
 env.local.sh
-*.local.json
 .env
 .envrc
 

@@ -53,7 +53,7 @@ from monai.transforms import (
     EnsureChannelFirst,
 )
 from monai.losses.perceptual import PerceptualLoss
-from scripts.config_utils import load_json_with_local
+from scripts.config_utils import load_json
 from scripts.utils import define_instance, compute_psnr
 from datasets import get_adapter
 import patches  # noqa: F401  # registers DiffusionModelUNetMaisiV2 / RFlowSchedulerV2 for ConfigParser
@@ -93,6 +93,11 @@ def load_config():
     # Generation phase
     parser.add_argument("--base_label_dir", type=str, default=None)
     parser.add_argument("--other_label_dir", type=str, default=None)
+    # Per-user paths. Passed by launcher from env.local.sh; if unset, dataset.json values (typically null) win.
+    parser.add_argument("--data_dir", type=str, default=None,
+                        help="Source NIfTI dir. Overrides dataset.data_dir.")
+    parser.add_argument("--feature_extractor_path", type=str, default=None,
+                        help="RadImageNet checkpoint .pth. Overrides dataset.feature_extractor_path.")
     parser.add_argument("--save_real", action="store_true")
     parser.add_argument("--save_volume", action="store_true")
     parser.add_argument("--no_amp", dest="amp", action="store_false")
@@ -110,11 +115,11 @@ def load_config():
 
     cli_overrides = {k: v for k, v in vars(args).items() if v is not None}
 
-    dataset_dict = load_json_with_local(args.dataset_config_path)
+    dataset_dict = load_json(args.dataset_config_path)
     for k, v in dataset_dict.items():
         setattr(args, k, v)
 
-    config_dict = load_json_with_local(args.config_path)
+    config_dict = load_json(args.config_path)
     for k, v in config_dict.items():
         setattr(args, k, v)
 

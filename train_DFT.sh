@@ -7,15 +7,15 @@
 # === SBATCH options below are cluster-specific. Edit for your cluster, =====
 # === or override at submission time (e.g. `sbatch -p mypart train_DFT.sh`). =
 #SBATCH --job-name=train_DFT
-#SBATCH --nodes=2
-#SBATCH --gpus-per-node=4
+#SBATCH --account=gpu
+#SBATCH --partition=gpu-4farm
+#SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=64
-#SBATCH --partition=P2
-#SBATCH --exclude=b00,b06,b07,b08,b09,b12,b15,b24,b30
-#SBATCH --time=0-12:00:00
-#SBATCH --mem=200GB
-#SBATCH --signal=B:SIGUSR1@180
+#SBATCH --gres=gpu:h100:4
+#SBATCH --cpus-per-task=56
+#SBATCH --time=1-00:00:00
+#SBATCH --signal=B:SIGUSR1@300
+#SBATCH --requeue
 #SBATCH -o /dev/null
 #SBATCH --open-mode=append
 
@@ -121,6 +121,10 @@ srun --cpu-bind=none,v --accel-bind=g torchrun \
       --model_config_path "${MODEL_CFG}" \
       --train_config_path "${TRAIN_CFG}" \
       --output_dir "${OUTPUT_DIR_BASE}" \
+      --data_dir "${DATA_DIR}" \
+      --train_label_dir "${TRAIN_CSV}" \
+      --valid_label_dir "${VALID_CSV}" \
+      --wandb_entity "${WANDB_ENTITY}" \
       --run_name "${EXP_NAME}" \
       --cpus_per_task "${SLURM_CPUS_PER_TASK}" \
       --pretrained_model_path "${PRETRAINED_PATH}" \
