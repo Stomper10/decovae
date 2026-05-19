@@ -40,10 +40,12 @@ fi
 # ======================================================================
 : "${EXP_NAME:=vad1e1_decft_noise1.0}"
 : "${STAGE:=stage1}"   # DFT fine-tunes the VAE decoder from a given stage
-: "${DATASET_CFG:=configs/ukb_20252/dataset.json}"
-: "${MODEL_CFG:=configs/ukb_20252/model_fm.json}"
-: "${TRAIN_CFG:=configs/ukb_20252/vae_decft_${STAGE}.json}"
-: "${OUTPUT_DIR_BASE:=${OUTPUT_ROOT:-./outputs/ukb_20252}/${STAGE}}"
+: "${DATASET:=ukb_20252}"
+source "${SCRIPT_DIR}/scripts/resolve_dataset.sh"
+: "${DATASET_CFG:=configs/${DATASET}/dataset.json}"
+: "${MODEL_CFG:=configs/${DATASET}/model_fm.json}"
+: "${TRAIN_CFG:=configs/${DATASET}/vae_decft_${STAGE}.json}"
+: "${OUTPUT_DIR_BASE:=${OUTPUT_ROOT}/${STAGE}}"
 : "${PRETRAINED_PATH:=${OUTPUT_DIR_BASE}/vad1e1/weights/vae/checkpoint-40000/model.pt}"
 : "${NOISE_SCALE:=1.0}"
 : "${PLOSS_MODEL:=squeeze}"

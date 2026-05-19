@@ -169,8 +169,9 @@ def init_distributed():
 # =============================================================================
 # Generation phase
 # =============================================================================
-def save_wandb_style_xyz_plot(tensor_1chw, filename, output_dir):
-    center = [89, 110, 89]
+def save_wandb_style_xyz_plot(tensor_1chw, filename, output_dir, center=None):
+    if center is None:
+        center = [tensor_1chw.shape[d + 1] // 2 for d in range(3)]
     vis_image = get_xyz_plot(tensor_1chw, center, mask_bool=False)
     vis_image = (vis_image - vis_image.min()) / (vis_image.max() - vis_image.min() + 1e-8)
     vis_image = (vis_image * 255).astype(np.uint8)

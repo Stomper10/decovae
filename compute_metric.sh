@@ -41,12 +41,14 @@ fi
 : "${PHASE:=all}"                    # generate | fid | all
 : "${NUM_IMAGES:=2500}"
 : "${POSTFIX:=30step}"
-: "${OUTPUT_DIR_BASE:=${OUTPUT_ROOT:-./outputs/ukb_20252}/${STAGE}}"
+: "${DATASET:=ukb_20252}"
+source "${SCRIPT_DIR}/scripts/resolve_dataset.sh"
+: "${OUTPUT_DIR_BASE:=${OUTPUT_ROOT}/${STAGE}}"
 : "${VAE_CKPT_NAME:=checkpoint-40000}"
 : "${UNET_CKPT_NAME:=checkpoint-10000}"
-: "${BASE_CSV:=${VALID_CSV:-./data/valid.csv}}"
-: "${OTHER_CSV:=${TRAIN_CSV:-./data/train.csv}}"
-: "${DATASET_CFG:=configs/ukb_20252/dataset.json}"
+: "${BASE_CSV:=${VALID_CSV}}"
+: "${OTHER_CSV:=${TRAIN_CSV}}"
+: "${DATASET_CFG:=configs/${DATASET}/dataset.json}"
 : "${NUM_GPUS:=4}"
 
 # ----------------------------------------------------------------------

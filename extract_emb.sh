@@ -37,18 +37,17 @@ fi
 # ======================================================================
 : "${EXP_NAME:=vad1e-0}"
 : "${STAGE:=stage1}"   # which VAE stage's checkpoint to encode embeddings from
-: "${STAGE_ROOT:=${OUTPUT_ROOT:-./outputs/ukb_20252}/${STAGE}}"
+: "${DATASET:=ukb_20252}"
+source "${SCRIPT_DIR}/scripts/resolve_dataset.sh"
+: "${STAGE_ROOT:=${OUTPUT_ROOT}/${STAGE}}"
 : "${WORK_DIR:=${STAGE_ROOT}/${EXP_NAME}}"
-: "${DATA_DIR:=./data/imaging}"
 : "${CKPT:=${WORK_DIR}/weights/vae/checkpoint-100000/model.pt}"
-: "${TRAIN_CSV:=./data/train.csv}"
-: "${VALID_CSV:=./data/valid.csv}"
 : "${STAGES:=extract,geometry,stat}" # extract,geometry,stat
 : "${CODE_DIR:=${SCRIPT_DIR}}"
-: "${DATASET_CFG:=${CODE_DIR}/configs/ukb_20252/dataset.json}"
-: "${CONFIG_ENV:=${CODE_DIR}/configs/ukb_20252/environment.json}"
-: "${CONFIG_DIFF:=${CODE_DIR}/configs/ukb_20252/diff_train_inf.json}"
-: "${CONFIG_MODEL_FM:=${CODE_DIR}/configs/ukb_20252/model_fm.json}"
+: "${DATASET_CFG:=${CODE_DIR}/configs/${DATASET}/dataset.json}"
+: "${CONFIG_ENV:=${CODE_DIR}/configs/${DATASET}/environment.json}"
+: "${CONFIG_DIFF:=${CODE_DIR}/configs/${DATASET}/diff_train_inf.json}"
+: "${CONFIG_MODEL_FM:=${CODE_DIR}/configs/${DATASET}/model_fm.json}"
 : "${NUM_GPUS:=4}"
 
 # ----------------------------------------------------------------------

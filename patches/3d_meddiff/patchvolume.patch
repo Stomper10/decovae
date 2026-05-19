@@ -1,0 +1,17 @@
+--- a/AutoEncoder/model/PatchVolume.py	2026-05-19 10:57:36.218633574 +0900
++++ b/AutoEncoder/model/PatchVolume.py	2026-05-19 10:57:03.485022000 +0900
+@@ -226,6 +226,14 @@
+             x_input = x
+ 
+         else:
++            # DecoVAE patch: unfold drops leftover voxels when D/H/W aren't
++            # multiples of patch_size, but the original recon_loss below
++            # compares x_recon against the *uncropped* x. Crop x first so the
++            # loss matches shape-wise (otherwise validation crashes on
++            # real-world volumes like UKB 182x218x182).
++            patch = self.patch_size
++            D, H, W = (D // patch) * patch, (H // patch) * patch, (W // patch) * patch
++            x = x[:, :, :D, :H, :W]
+             x_input = x.unfold(2,self.patch_size,self.patch_size).unfold(3,self.patch_size,self.patch_size).unfold(4,self.patch_size,self.patch_size)
+             x_input = rearrange(x_input , 'b c p1 p2 p3 d h w -> (b p1 p2 p3) c d h w')
+ 

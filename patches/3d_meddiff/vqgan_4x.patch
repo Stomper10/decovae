@@ -1,0 +1,58 @@
+--- a/dataset/vqgan_4x.py	2026-05-19 10:52:04.690233517 +0900
++++ b/dataset/vqgan_4x.py	2026-05-19 10:50:43.910807000 +0900
+@@ -14,15 +14,33 @@
+         self.file_names = []
+         self.stage = stage
+         print(root_dir)
++        # DecoVAE patch: support JSON with explicit {"train": [...], "val": [...]}
++        # split (paths or dirs), in addition to the upstream
++        # {"<name>": <dir-or-list-of-dirs>} schema. When the explicit split
++        # form is detected we skip the last-40 fallback below.
++        explicit_split = False
+         if root_dir.endswith('json'):
+             with open(root_dir) as json_file:
+                 dataroots = json.load(json_file)
+-            for key,value in dataroots.items():
+-                if type(value) == list:
+-                    for path in value:
+-                        self.file_names += (glob.glob(os.path.join(path, './*.nii.gz'), recursive=True))
+-                else:
+-                    self.file_names += (glob.glob(os.path.join(value, './*.nii.gz'), recursive=True))
++            if set(dataroots.keys()) >= {'train', 'val'} and split in dataroots:
++                explicit_split = True
++                entries = dataroots[split]
++                entries = entries if isinstance(entries, list) else [entries]
++                for entry in entries:
++                    if entry.endswith('.nii.gz'):
++                        self.file_names.append(entry)
++                    else:
++                        self.file_names += glob.glob(os.path.join(entry, './*.nii.gz'), recursive=True)
++            else:
++                for key,value in dataroots.items():
++                    if type(value) == list:
++                        for path in value:
++                            if path.endswith('.nii.gz'):
++                                self.file_names.append(path)
++                            else:
++                                self.file_names += (glob.glob(os.path.join(path, './*.nii.gz'), recursive=True))
++                    else:
++                        self.file_names += (glob.glob(os.path.join(value, './*.nii.gz'), recursive=True))
+         else:
+             self.root_dir = root_dir
+             self.file_names = glob.glob(os.path.join(
+@@ -32,10 +50,11 @@
+ 
+         self.split = split
+         self.augmentation = augmentation
+-        if split == 'train':
+-            self.file_names = self.file_names[:-40]
+-        elif split == 'val':
+-            self.file_names = self.file_names[-40:]
++        if not explicit_split:
++            if split == 'train':
++                self.file_names = self.file_names[:-40]
++            elif split == 'val':
++                self.file_names = self.file_names[-40:]
+         self.patch_sampler = tio.data.UniformSampler(patch_size)
+ 
+         self.patch_sampler_256 = tio.data.UniformSampler((256,256,128))#

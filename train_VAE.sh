@@ -43,11 +43,13 @@ fi
 # EXPERIMENT CONFIG — edit here, or override at sbatch time via --export
 # ======================================================================
 : "${EXP_NAME:=vad1e-0}"
-: "${STAGE:=stage1}"   # switch stages with: STAGE=stage2 sbatch train_VAE.sh
-: "${DATASET_CFG:=configs/ukb_20252/dataset.json}"
-: "${MODEL_CFG:=configs/ukb_20252/model_fm.json}"
-: "${TRAIN_CFG:=configs/ukb_20252/vae_train_${STAGE}.json}"
-: "${OUTPUT_DIR_BASE:=${OUTPUT_ROOT:-./outputs/ukb_20252}/${STAGE}}"
+: "${STAGE:=stage1}"     # switch stages: STAGE=stage2 sbatch train_VAE.sh
+: "${DATASET:=ukb_20252}"  # switch dataset: DATASET=ixi sbatch train_VAE.sh
+source "${SCRIPT_DIR}/scripts/resolve_dataset.sh"
+: "${DATASET_CFG:=configs/${DATASET}/dataset.json}"
+: "${MODEL_CFG:=configs/${DATASET}/model_fm.json}"
+: "${TRAIN_CFG:=configs/${DATASET}/vae_train_${STAGE}.json}"
+: "${OUTPUT_DIR_BASE:=${OUTPUT_ROOT}/${STAGE}}"
 : "${LAMBDA_COV:=1.0}"
 : "${LAMBDA_COR:=0.0}"
 : "${LAMBDA_VAR:=1.0}"

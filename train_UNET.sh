@@ -40,10 +40,12 @@ fi
 # ======================================================================
 : "${EXP_NAME:=vad1e1}"
 : "${STAGE:=stage1}"   # which VAE stage's latents to train the UNet on
-: "${DATASET_CFG:=configs/ukb_20252/dataset.json}"
-: "${MODEL_CFG:=configs/ukb_20252/model_fm.json}"
-: "${TRAIN_CFG:=configs/ukb_20252/diff_train_inf.json}"
-: "${OUTPUT_DIR_BASE:=${OUTPUT_ROOT:-./outputs/ukb_20252}/${STAGE}}"
+: "${DATASET:=ukb_20252}"
+source "${SCRIPT_DIR}/scripts/resolve_dataset.sh"
+: "${DATASET_CFG:=configs/${DATASET}/dataset.json}"
+: "${MODEL_CFG:=configs/${DATASET}/model_fm.json}"
+: "${TRAIN_CFG:=configs/${DATASET}/diff_train_inf.json}"
+: "${OUTPUT_DIR_BASE:=${OUTPUT_ROOT}/${STAGE}}"
 : "${RESUME:=1}"   # 1 = pass --resume, 0 = fresh start
 
 # ----------------------------------------------------------------------

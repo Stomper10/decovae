@@ -1,0 +1,39 @@
+{
+    "dataset_adapter": "brats",
+    "modality": "mri",
+    "wandb_project_vae": "VAE_BraTS",
+    "wandb_project_dft": "VAE_BraTS_Decoder_FT",
+    "wandb_project_unet": "UNET_BraTS",
+    "wandb_entity": null,
+
+    "data_dir": null,
+    "train_label_dir": null,
+    "valid_label_dir": null,
+
+    "resolution": [240, 240, 155],
+    "orientation_axcodes": "RAS",
+    "intensity_norm": {
+        "type": "percentile",
+        "lower": 0.0,
+        "upper": 99.5,
+        "b_min": 0.0,
+        "b_max": 1.0,
+        "clip": false
+    },
+    "intensity_norm_metric": {
+        "type": "percentile",
+        "lower": 0.0,
+        "upper": 99.5,
+        "b_min": 0.0,
+        "b_max": 1.0,
+        "clip": true
+    },
+    "select_channel": 0,
+
+    "latent_shape": [32, 64, 32],
+    "fid_resolution": [128, 256, 128],
+    "fid_target_shape": "128x256x128",
+    "inference_spacing": [1.0, 1.0, 1.0],
+
+    "feature_extractor_path": null
+}

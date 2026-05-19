@@ -29,16 +29,31 @@
 # export TMP="${TMPDIR_LOCAL}"
 # export TORCHINDUCTOR_CACHE_DIR="${TORCH_CACHE_LOCAL}"
 
-# --- Default paths for experiments ------------------------------------------
-# Set these to your local data / output locations.
-# OUTPUT_ROOT is the per-dataset root; each launcher appends "${STAGE}" to it
-# (e.g. ${OUTPUT_ROOT}/stage1). Override STAGE per-invocation:
-#   STAGE=stage2 sbatch train_VAE.sh
-# export OUTPUT_ROOT=./outputs/ukb_20252          # experiments live under <OUTPUT_ROOT>/<STAGE>/<EXP_NAME>/
-# export DATA_DIR=/path/to/UKB/imaging            # raw image volumes  (-> --data_dir)
-# export TRAIN_CSV=/path/to/train.csv             # subject metadata + label  (-> --train_label_dir)
-# export VALID_CSV=/path/to/valid.csv             # (-> --valid_label_dir)
-# export CODE_DIR="$(pwd)"                        # repository root (extract_emb only)
+# --- Dataset paths -----------------------------------------------------------
+# Each dataset gets a <PREFIX>_* block; launchers pick the right one via the
+# DATASET env var (defaults to ukb_20252). See scripts/resolve_dataset.sh.
+# Override STAGE per-invocation:    STAGE=stage2 sbatch train_VAE.sh
+# Override DATASET per-invocation:  DATASET=ixi  sbatch train_VAE.sh
+#
+# export CODE_DIR="$(pwd)"                              # repo root (extract_emb only)
+#
+# UKB (field 20252, T1 brain MRI)
+# export UKB_DATA_DIR=/path/to/UKB/imaging
+# export UKB_TRAIN_CSV=/path/to/csv_files/train.csv
+# export UKB_VALID_CSV=/path/to/csv_files/valid.csv
+# export UKB_OUTPUT_ROOT=/path/to/outputs/ukb_20252
+#
+# IXI (cross-site, T1)
+# export IXI_DATA_DIR=/path/to/IXI
+# export IXI_TRAIN_CSV=/path/to/csv_files/ixi_T1_train.csv
+# export IXI_VALID_CSV=/path/to/csv_files/ixi_T1_valid.csv
+# export IXI_OUTPUT_ROOT=/path/to/outputs/ixi
+#
+# BraTS-GLI 2023
+# export BRATS_DATA_DIR=/path/to/BraTS2023/.../TrainingData
+# export BRATS_TRAIN_CSV=/path/to/csv_files/brats_train.csv
+# export BRATS_VALID_CSV=/path/to/csv_files/brats_valid.csv
+# export BRATS_OUTPUT_ROOT=/path/to/outputs/brats
 
 # --- W&B (optional) ----------------------------------------------------------
 # Set your Weights & Biases entity (team or user).
