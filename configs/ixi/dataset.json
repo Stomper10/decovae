@@ -30,9 +30,9 @@
     },
     "select_channel": 0,
 
-    "latent_shape": [32, 64, 32],
-    "fid_resolution": [128, 256, 128],
-    "fid_target_shape": "128x256x128",
+    "latent_shape": [64, 64, 32],
+    "fid_resolution": [256, 256, 128],
+    "fid_target_shape": "256x256x128",
     "inference_spacing": [0.9375, 0.9375, 1.2],
 
     "feature_extractor_path": null
