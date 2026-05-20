@@ -1,0 +1,12 @@
+{
+    "_comment": "SFCN brain-age regressor — synthetic-aug downstream eval. UKB c=4 stage2 weights will populate synthetic_csv later via scripts/generate_synthetic_for_age.py.",
+    "resolution": [160, 192, 160],
+    "orientation_axcodes": "RAS",
+    "epochs": 60,
+    "batch_size": 4,
+    "num_workers": 4,
+    "cache_rate": 0.0,
+    "lr": 1e-3,
+    "weight_decay": 1e-4,
+    "dropout": 0.5
+}

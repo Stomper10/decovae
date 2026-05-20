@@ -56,4 +56,8 @@ class BraTSAdapter(DatasetAdapter):
         return df.copy()
 
     def derive_conditions(self, row: pd.Series) -> list[float]:
-        return []
+        # Placeholder scalar so the UNet dataloader's `Lambdad(cond -> x[0])`
+        # doesn't IndexError. The BraTS UNet runs unconditional (model_fm.json
+        # sets include_meta_input=false), so this value is ignored at training
+        # time. ControlNetMaisi carries the actual (mask) condition.
+        return [0.0]

@@ -1,0 +1,11 @@
+{
+    "_comment": "SegResNet tumor segmentor — synthetic-aug downstream eval on BraTS-GLI 2023. roi_size is the sliding-window patch at val time; resolution is the resized input footprint.",
+    "resolution": [240, 240, 144],
+    "roi_size": [128, 128, 128],
+    "epochs": 200,
+    "batch_size": 2,
+    "num_workers": 4,
+    "cache_rate": 0.0,
+    "lr": 1e-4,
+    "weight_decay": 1e-5
+}

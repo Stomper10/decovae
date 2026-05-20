@@ -62,7 +62,7 @@
         "resblock_updown": true,
         "include_fc": true,
         "use_checkpointing": true,
-        "include_meta_input": true
+        "include_meta_input": false
     },
     "controlnet_def": {
         "_target_": "monai.apps.generation.maisi.networks.controlnet_maisi.ControlNetMaisi",

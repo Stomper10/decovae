@@ -1,0 +1,20 @@
+{
+    "_comment": "ControlNet (mask-conditional) training config for BraTS-GLI 2023. Mirrors diff_train_inf.json. Reuse same scheduler block (noise_scheduler / train timesteps) via model_fm.json's controlnet_def. Hyperparameters chosen to mirror NV-Generate-CTMR's scripts/train_controlnet.py defaults; tune after first sanity.",
+    "controlnet_train": {
+        "batch_size": 2,
+        "cache_rate": 0.0,
+        "checkpointing_steps": 5000,
+        "gradient_accumulation_steps": 1,
+        "lr": 0.0001,
+        "max_train_steps": 50000,
+        "num_valid": 50,
+        "pretrained_steps": 0,
+        "report_to": true,
+        "seed": 42,
+        "val_batch_size": 2,
+        "validation_steps": 2500,
+        "num_mask_classes": 4,
+        "weighted_loss": 5.0,
+        "weighted_loss_label": [3]
+    }
+}
