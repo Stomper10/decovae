@@ -1,5 +1,5 @@
---- a/dataset/vqgan_4x.py	2026-05-19 10:52:04.690233517 +0900
-+++ b/dataset/vqgan_4x.py	2026-05-19 10:50:43.910807000 +0900
+--- a/dataset/vqgan_4x.py	2026-05-19 17:08:36.097923840 +0900
++++ b/dataset/vqgan_4x.py	2026-05-19 17:06:36.926455000 +0900
 @@ -14,15 +14,33 @@
          self.file_names = []
          self.stage = stage
@@ -40,7 +40,7 @@
          else:
              self.root_dir = root_dir
              self.file_names = glob.glob(os.path.join(
-@@ -32,10 +50,11 @@
+@@ -32,14 +50,22 @@
  
          self.split = split
          self.augmentation = augmentation
@@ -56,3 +56,22 @@
          self.patch_sampler = tio.data.UniformSampler(patch_size)
  
          self.patch_sampler_256 = tio.data.UniformSampler((256,256,128))#
+         self.randomflip = tio.RandomFlip( axes=(0,1),flip_probability=0.5)
++        # DecoVAE patch: percentile-based rescaling to [0,1] so the
++        # downstream `* 2 - 1` correctly maps to [-1, 1]. UKB / IXI / BraTS
++        # raw NIfTI files are in native MR intensity space (e.g. 0-1800),
++        # not [0, 1] as upstream silently assumed.
++        self.intensity_rescale = tio.transforms.RescaleIntensity(
++            out_min_max=(0.0, 1.0), percentiles=(0.5, 99.5)
++        )
+         print(f'With patch size {str(patch_size)}')
+     def __len__(self):
+         return len(self.file_names)
+@@ -47,6 +73,7 @@
+     def __getitem__(self, index):
+         path = self.file_names[index]
+         whole_img = tio.ScalarImage(path)
++        whole_img = self.intensity_rescale(whole_img)
+         if self.stage == 1 and self.split == 'train':
+             img = None
+             while img== None or img.data.sum() ==0:

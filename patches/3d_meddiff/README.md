@@ -34,7 +34,7 @@ pip install -r external/3d_meddiff/requirements.txt
 ## 적용 패치 목록
 
 - `requirements.patch` — upstream의 conda local `file://` 경로를 PyPI 핀으로 교체 + `cu121` PyPI extra-index 추가
-- `vqgan_4x.patch` — `VQGANDataset_4x`가 JSON에 `{"train": [...], "val": [...]}` 명시 split 스키마를 인식 + 디렉토리/파일 경로 양쪽 허용 (upstream은 디렉토리 + 끝 40개만 val로 가정)
+- `vqgan_4x.patch` — `VQGANDataset_4x`가 JSON에 `{"train": [...], "val": [...]}` 명시 split 스키마를 인식 + 디렉토리/파일 경로 양쪽 허용 (upstream은 디렉토리 + 끝 40개만 val로 가정). 추가로 `tio.RescaleIntensity(percentiles=(0.5, 99.5))`로 입력 정규화 ([0,1] → 이후 `*2-1` → [-1,1]). upstream의 `*2-1`은 [0,1] 입력을 가정하지만 실제 raw NIfTI는 [0,1800]+ 범위라 recon scale이 깨졌음. (sanity v2 215834에서 검증)
 - `patchvolume.patch` — `PatchVolumeAE.forward`의 val 경로에서 입력 텐서를 `patch_size`의 배수로 crop (UKB 218 등 비배수 axis 처리)
 
 ## Data bridge
@@ -69,3 +69,11 @@ sbatch --partition=gpu-4farm --gres=gpu:h100:4 --ntasks-per-node=4 --cpus-per-ta
 ```
 
 **주의**: PL DDP는 `--ntasks-per-node == cfg.model.gpus` 필요. 기본 8 GPU 외 GPU 수로 돌릴 땐 두 값을 모두 override.
+
+## Requeue auto-resume
+
+`train_3d_meddiff.sh`는 launcher 진입 시 `${default_root_dir}/my_model/version_*/checkpoints/*.ckpt`에서 mtime이 가장 최근인 ckpt를 찾아 임시 yaml로 `resume_from_checkpoint`를 주입한다. 따라서:
+
+- 1-day 한계 hit → SIGUSR1 → PL checkpoint → `scontrol requeue` → 동일 job_id로 재시작 시 마지막 ckpt부터 이어짐.
+- 처음 실행은 ckpt가 없으니 fresh start.
+- 임시 yaml은 `${LOGS_DIR}/config_resume_${SLURM_JOB_ID}.yaml`로 보관되어 audit 가능.

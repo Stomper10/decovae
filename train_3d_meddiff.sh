@@ -37,7 +37,8 @@ conda activate 3d_meddiff
 : "${CONFIG:=configs/3d_meddiff/PatchVolume_4x_ukb.yaml}"
 : "${EXP_NAME:=ukb_c4}"
 
-LOGS_DIR="/data/wonyoungjang/decodata/3d_meddiff/${EXP_NAME}/logs"
+EXP_ROOT="/data/wonyoungjang/decodata/3d_meddiff/${EXP_NAME}"
+LOGS_DIR="${EXP_ROOT}/logs"
 mkdir -p "${LOGS_DIR}"
 EXP_LOG="${LOGS_DIR}/3d_meddiff_${SLURM_JOB_ID}.log"
 exec >> "${EXP_LOG}" 2>&1
@@ -46,6 +47,28 @@ echo "3D MedDiff PatchVolume baseline"
 echo "  config  : ${CONFIG}"
 echo "  exp_name: ${EXP_NAME}"
 echo "  job_id  : ${SLURM_JOB_ID}"
+
+# Auto-resume from latest checkpoint if the 100k-step run was requeued.
+# PL writes to ${default_root_dir}/my_model/version_N/checkpoints/ where N
+# increments each run. Pick the .ckpt with the highest mtime across all
+# versions and inject it into a temp yaml so train_PatchVolume.py picks it up.
+LATEST_CKPT=$(ls -1t "${EXP_ROOT}/my_model/version_"*/checkpoints/*.ckpt 2>/dev/null | head -n 1)
+if [[ -n "${LATEST_CKPT}" ]]; then
+    RUN_CONFIG="${LOGS_DIR}/config_resume_${SLURM_JOB_ID}.yaml"
+    python -c "
+import sys
+from omegaconf import OmegaConf
+cfg = OmegaConf.load('${CONFIG}')
+cfg.model.resume_from_checkpoint = '${LATEST_CKPT}'
+OmegaConf.save(cfg, '${RUN_CONFIG}')
+print('Injected resume_from_checkpoint:', '${LATEST_CKPT}')
+"
+    echo "  resume  : ${LATEST_CKPT}"
+    echo "  config (rewritten): ${RUN_CONFIG}"
+else
+    RUN_CONFIG="${CONFIG}"
+    echo "  resume  : (none — fresh start)"
+fi
 
 # Auto-requeue on SIGUSR1 (sent 300s before time limit). PL writes a
 # checkpoint to default_root_dir before SLURM kills the process.
@@ -64,6 +87,6 @@ function resubmit() {
 }
 trap 'resubmit' SIGUSR1
 
-srun python external/3d_meddiff/train/train_PatchVolume.py --config "${CONFIG}" &
+srun python external/3d_meddiff/train/train_PatchVolume.py --config "${RUN_CONFIG}" &
 wait
 exit 0
