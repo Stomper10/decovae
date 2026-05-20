@@ -10,7 +10,9 @@ torchvision>=0.21,<0.23
 torchaudio>=2.6,<2.8
 
 # MONAI + medical imaging
-monai==1.4.0
+# 1.5.0 adds rectified_flow scheduler (consumed by train_UNET / train_CONTROLNET).
+# Sticks to ==-pin for now to keep MaisiV2 patch in sync with upstream API.
+monai==1.5.0
 nibabel>=5.3
 pydicom>=3.0
 itk>=5.4
