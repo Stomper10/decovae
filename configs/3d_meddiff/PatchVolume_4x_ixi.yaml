@@ -10,7 +10,7 @@ model:
   gpus: 8
   default_root_dir: /data/wonyoungjang/decodata/3d_meddiff/ixi_c4
   resume_from_checkpoint:
-  max_steps: 100000
+  max_steps: 300000   # compute-matched to MAISI/DeCo-VAE stage1+stage2 (see UKB yaml)
   max_epochs: 10000
   precision: bf16
 

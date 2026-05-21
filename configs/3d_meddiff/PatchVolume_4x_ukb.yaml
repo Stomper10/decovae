@@ -9,7 +9,12 @@
 #   - default_root_dir  : DecoVAE-managed output path
 #   - root_dir          : data.json from scripts/build_3d_meddiff_data_json.py
 #   - imgtype           : MR (upstream default is CT)
-#   - max_steps         : 100000 (sanity baseline run; raise for full training)
+#   - max_steps         : 300000 (compute-matched to MAISI/DeCo-VAE stage1+stage2
+#                                 total = 100k + 200k = 300k. Upstream default is
+#                                 1,000,000; we restrict for compute-matched
+#                                 comparison. Convergence-validate at 300k via
+#                                 evaluation/convergence_plot.py — if slope
+#                                 > 0.5%/10ep, extend to 400k cap.)
 
 model:
   seed: 1234
@@ -19,7 +24,7 @@ model:
   gpus: 8
   default_root_dir: /data/wonyoungjang/decodata/3d_meddiff/ukb_c4
   resume_from_checkpoint:
-  max_steps: 100000
+  max_steps: 300000
   max_epochs: 10000
   precision: bf16
 
