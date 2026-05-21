@@ -66,6 +66,17 @@ mkdir -p "${EXP_DIR}/embeddings" "${LOGS_DIR}" "${EXP_DIR}/outputs" "${EXP_DIR}/
 EXP_LOG="${LOGS_DIR}/${EXP_NAME}_vae_${SLURM_JOB_ID}.log"
 exec >> "${EXP_LOG}" 2>&1
 
+# Auto-resume override: if any checkpoint-* dir already exists under
+# weights/vae, force RESUME=1 regardless of submission-time env. SLURM
+# preserves submission env across requeues, so without this a job
+# launched with RESUME=0 would restart from step 0 on every requeue.
+if compgen -G "${EXP_DIR}/weights/vae/checkpoint-*" > /dev/null; then
+    if [[ "${RESUME}" != "1" ]]; then
+        echo "[auto-resume] existing checkpoints under ${EXP_DIR}/weights/vae — overriding RESUME=${RESUME} -> 1"
+    fi
+    RESUME=1
+fi
+
 # ----------------------------------------------------------------------
 # DDP rendezvous
 # ----------------------------------------------------------------------

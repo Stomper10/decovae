@@ -60,6 +60,17 @@ mkdir -p "${EXP_DIR}/analysis" "${EXP_DIR}/embeddings" "${LOGS_DIR}" "${EXP_DIR}
 EXP_LOG="${LOGS_DIR}/${EXP_NAME}_controlnet_${SLURM_JOB_ID}.log"
 exec >> "${EXP_LOG}" 2>&1
 
+# Auto-resume override: if any checkpoint-* dir exists under
+# weights/controlnet, force RESUME=1 regardless of submission-time env.
+# SLURM preserves the submission env across requeues, so without this a
+# job launched with RESUME=0 would restart from step 0 on every requeue.
+if compgen -G "${EXP_DIR}/weights/controlnet/checkpoint-*" > /dev/null; then
+    if [[ "${RESUME}" != "1" ]]; then
+        echo "[auto-resume] existing checkpoints under ${EXP_DIR}/weights/controlnet — overriding RESUME=${RESUME} -> 1"
+    fi
+    RESUME=1
+fi
+
 # ----------------------------------------------------------------------
 # DDP rendezvous
 # ----------------------------------------------------------------------
