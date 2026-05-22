@@ -57,11 +57,21 @@ echo "  config  : ${CONFIG}"
 echo "  exp_name: ${EXP_NAME}"
 echo "  job_id  : ${SLURM_JOB_ID}"
 
-# Auto-resume from latest checkpoint if the 100k-step run was requeued.
-# PL writes to ${default_root_dir}/my_model/version_N/checkpoints/ where N
-# increments each run. Pick the .ckpt with the highest mtime across all
-# versions and inject it into a temp yaml so train_PatchVolume.py picks it up.
-LATEST_CKPT=$(ls -1t "${EXP_ROOT}/my_model/version_"*/checkpoints/*.ckpt 2>/dev/null | head -n 1)
+# Auto-resume from the highest-step checkpoint. ModelCheckpoint writes two
+# kinds of .ckpt under ${default_root_dir}/my_model/version_N/checkpoints/:
+#   1. top-level latest_checkpoint{,-v1,-v2}.ckpt — the val-best top-3 (NOT
+#      necessarily the freshest step; e.g. v-best may sit at step 88k while
+#      training already hit 100k).
+#   2. epoch=E-step=S-...-train/recon_loss=L.ckpt — every-N-steps snapshots,
+#      one ckpt nested per directory. These are the true progress markers.
+# We extract the `step=S` token from any matching path and pick the highest S.
+# Fallback: mtime sort if no step-tagged ckpt found (e.g. very early fresh run).
+LATEST_CKPT=$(find "${EXP_ROOT}/my_model" -maxdepth 5 -type f -name '*.ckpt' 2>/dev/null \
+              | awk -F 'step=' 'NF>1 { n=$2; sub(/[^0-9].*/,"",n); print n"\t"$0 }' \
+              | sort -k1,1n | tail -n 1 | cut -f2-)
+if [[ -z "${LATEST_CKPT}" ]]; then
+    LATEST_CKPT=$(ls -1t "${EXP_ROOT}/my_model/version_"*/checkpoints/*.ckpt 2>/dev/null | head -n 1)
+fi
 if [[ -n "${LATEST_CKPT}" ]]; then
     RUN_CONFIG="${LOGS_DIR}/config_resume_${SLURM_JOB_ID}.yaml"
     python -c "
