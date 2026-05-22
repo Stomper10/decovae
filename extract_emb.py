@@ -437,18 +437,32 @@ def run_geometry(args: argparse.Namespace):
     C = raw_flat.shape[1]
     off_diag = ~torch.eye(C, dtype=torch.bool, device=device)
 
-    raw_normed = F.normalize(raw_flat, p=2, dim=0)
-    raw_corr = torch.mm(raw_normed.t(), raw_normed)
-    raw_cos_sim = raw_corr[off_diag].abs().mean().item()
-    print(f"[1] Before Shifting: raw_cos_sim={raw_cos_sim:.4f}")
-    del raw_flat, raw_normed, raw_corr
-    torch.cuda.empty_cache()
+    # Per-channel mean for proper Pearson correlation. Distinct from the
+    # scalar global_mean above (used by UNet downstream); the scalar mean
+    # cannot decorrelate channels.
+    channel_mean = raw_flat.mean(dim=0, keepdim=True)
 
-    diff_normed = F.normalize(diff_flat, p=2, dim=0)
-    diff_corr = torch.mm(diff_normed.t(), diff_normed)
-    diff_cos_sim = diff_corr[off_diag].abs().mean().item()
-    print(f"[2] After Shifting: diff_cos_sim={diff_cos_sim:.4f}")
-    del diff_normed, diff_corr
+    # [1] raw_cos_sim — channel cosine similarity (no centering).
+    # Use the X^T X / sqrt(diag) outer-product trick instead of F.normalize
+    # to avoid allocating a (N, C)-shaped normed copy of raw_flat (was OOM
+    # at N=327M).
+    xtx = torch.mm(raw_flat.t(), raw_flat)
+    d = xtx.diag().clamp(min=1e-8).sqrt()
+    raw_corr = xtx / (d[:, None] * d[None, :])
+    raw_cos_sim = raw_corr[off_diag].abs().mean().item()
+    print(f"[1] raw_cos_sim={raw_cos_sim:.4f}  (no centering)")
+    del xtx, d, raw_corr
+
+    # [2] diff_cos_sim — Pearson R off-diagonal abs mean. Center raw_flat
+    # in-place to avoid a second 5GB tensor; downstream uses diff_flat
+    # (constructed earlier, independent of raw_flat).
+    raw_flat.sub_(channel_mean)
+    xtx_c = torch.mm(raw_flat.t(), raw_flat)
+    d = xtx_c.diag().clamp(min=1e-8).sqrt()
+    pearson_R = xtx_c / (d[:, None] * d[None, :])
+    diff_cos_sim = pearson_R[off_diag].abs().mean().item()
+    print(f"[2] diff_cos_sim={diff_cos_sim:.4f}  (Pearson R off-diagonal)")
+    del raw_flat, xtx_c, d, pearson_R
     torch.cuda.empty_cache()
 
     N = diff_flat.shape[0]

@@ -49,9 +49,16 @@ EXP_LOG="${LOGS_DIR}/${EXP_NAME}_brain_age_${SLURM_JOB_ID}.log"
 exec >> "${EXP_LOG}" 2>&1
 
 # Parse hyperparams from JSON (lightweight — avoids adding a dep on jq).
-read EPOCHS BS NW LR WD DROPOUT <<EOF
+# Each value is env-overrideable: `EPOCHS=2 BS=2 sbatch train_brain_age.sh` etc.
+read CFG_EPOCHS CFG_BS CFG_NW CFG_LR CFG_WD CFG_DROPOUT <<EOF
 $(python -c "import json,sys;c=json.load(open('${BRAIN_AGE_CFG}'));print(c['epochs'],c['batch_size'],c['num_workers'],c['lr'],c['weight_decay'],c['dropout'])")
 EOF
+: "${EPOCHS:=${CFG_EPOCHS}}"
+: "${BS:=${CFG_BS}}"
+: "${NW:=${CFG_NW}}"
+: "${LR:=${CFG_LR}}"
+: "${WD:=${CFG_WD}}"
+: "${DROPOUT:=${CFG_DROPOUT}}"
 
 export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n1)
 export MASTER_PORT=$((10000 + RANDOM % 50000))

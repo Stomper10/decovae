@@ -46,6 +46,9 @@ source "${SCRIPT_DIR}/scripts/resolve_dataset.sh"
 : "${OUTPUT_DIR_BASE:=${OUTPUT_ROOT}/${STAGE}}"
 : "${VAE_CKPT_NAME:=checkpoint-40000}"
 : "${UNET_CKPT_NAME:=checkpoint-10000}"
+# UNET_EXP_NAME defaults to EXP_NAME, but can be overridden when VAE and UNet
+# live under different experiment dirs (e.g. DFT VAE + plain stage2 UNet).
+: "${UNET_EXP_NAME:=${EXP_NAME}}"
 : "${BASE_CSV:=${VALID_CSV}}"
 : "${OTHER_CSV:=${TRAIN_CSV}}"
 : "${DATASET_CFG:=configs/${DATASET}/dataset.json}"
@@ -73,6 +76,7 @@ export OMP_NUM_THREADS=1
 
 echo "$(date +"%Y-%m-%d %H-%M-%S") :: compute_metric"
 echo "  EXP_NAME   : ${EXP_NAME}"
+echo "  UNET_EXP   : ${UNET_EXP_NAME}"
 echo "  EVAL_MODE  : ${EVAL_MODE}"
 echo "  PHASE      : ${PHASE}"
 echo "  NUM_IMAGES : ${NUM_IMAGES}"
@@ -85,9 +89,43 @@ echo "  num_gpus   : ${NUM_GPUS}"
 # ----------------------------------------------------------------------
 # Compose CLI args
 # ----------------------------------------------------------------------
+UNET_EXP_DIR="${OUTPUT_DIR_BASE}/${UNET_EXP_NAME}"
 VAE_PATH="${EXP_DIR}/weights/vae/${VAE_CKPT_NAME}"
-UNET_PATH="${EXP_DIR}/weights/unet/${UNET_CKPT_NAME}"
-CONFIG_PATH="${EXP_DIR}/weights/unet/config.json"
+UNET_PATH="${UNET_EXP_DIR}/weights/unet/${UNET_CKPT_NAME}"
+
+# compute_metric.py expects --config_path to contain top-level model defs
+# (autoencoder_def, noise_scheduler, diffusion_unet_def) plus inference
+# scalars (num_inference_steps, scale_factor, global_mean) for real_vs_gen.
+# Build a merged config under EXP_DIR/logs/ from:
+#   - configs/${DATASET}/model_fm.json     (model defs)
+#   - configs/${DATASET}/diff_train_inf.json -> num_inference_steps
+#   - ${UNET_EXP_DIR}/analysis/latent_stats.csv -> scale_factor / global_mean
+# The latent stats live under UNET_EXP_DIR because DFT only re-tunes the
+# decoder; encoder embeddings (and therefore latent stats) are shared with the
+# plain stage2 run.
+MERGED_CONFIG_DIR="${LOGS_DIR}"
+CONFIG_PATH="${MERGED_CONFIG_DIR}/merged_config_${SLURM_JOB_ID:-$$}.json"
+LATENT_STATS_CSV="${UNET_EXP_DIR}/analysis/latent_stats.csv"
+python3 - <<PY
+import json, os, sys
+m = json.load(open("${SCRIPT_DIR}/configs/${DATASET}/model_fm.json"))
+if "${EVAL_MODE}" == "real_vs_gen":
+    d = json.load(open("${SCRIPT_DIR}/configs/${DATASET}/diff_train_inf.json"))
+    # Flatten all diffusion_unet_inference keys to top-level so compute_metric.py
+    # can access them via args.<key> (e.g. num_inference_steps, stochastic_scale).
+    for k, v in d["diffusion_unet_inference"].items():
+        m[k] = v
+    stats_csv = "${LATENT_STATS_CSV}"
+    if not os.path.exists(stats_csv):
+        sys.exit(f"[compute_metric.sh] latent_stats.csv missing: {stats_csv}")
+    import pandas as pd
+    s = pd.read_csv(stats_csv).iloc[0]
+    # column name in the CSV is 'scaling_factor'; compute_metric.py reads 'scale_factor'
+    m["scale_factor"] = float(s["scaling_factor"])
+    m["global_mean"] = float(s["global_mean"])
+json.dump(m, open("${CONFIG_PATH}", "w"), indent=2)
+print(f"[compute_metric.sh] wrote merged config: ${CONFIG_PATH}")
+PY
 
 srun --cpu-bind=none,v --accel-bind=g torchrun \
     --nproc_per_node=${NUM_GPUS} \
