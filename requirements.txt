@@ -5,9 +5,13 @@
 # of the full conda env if you need full reproducibility.
 
 # Deep learning
-torch>=2.6,<2.8
-torchvision>=0.21,<0.23
-torchaudio>=2.6,<2.8
+# Pin to the torch 2.6 ABI line. torchvision 0.22 / torchaudio 2.7 require
+# torch 2.7 and segfault with `operator torchvision::nms does not exist` when
+# imported against torch 2.6 (hit 2026-05-22 after monai 1.5 upgrade pulled
+# torchvision 0.22 transitively into the deco_v15 env).
+torch>=2.6,<2.7
+torchvision>=0.21,<0.22
+torchaudio>=2.6,<2.7
 
 # MONAI + medical imaging
 # 1.5.0 adds rectified_flow scheduler (consumed by train_UNET / train_CONTROLNET).
