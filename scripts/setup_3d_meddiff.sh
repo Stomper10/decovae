@@ -55,6 +55,7 @@ Create it once:
     conda create -n 3d_meddiff python=3.11.11 -y
     conda activate 3d_meddiff
     pip install -r external/3d_meddiff/requirements.txt
+    pip install wandb           # required by patches/3d_meddiff/wandb_logger.patch
 
 Build a data.json from a DecoVAE manifest (UKB / IXI / BraTS).  Our patched
 VQGANDataset_4x accepts an explicit train/val split:

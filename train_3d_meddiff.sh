@@ -37,6 +37,15 @@ conda activate 3d_meddiff
 : "${CONFIG:=configs/3d_meddiff/PatchVolume_4x_ukb.yaml}"
 : "${EXP_NAME:=ukb_c4}"
 
+# W&B logging — picked up by patches/3d_meddiff/wandb_logger.patch.
+# Unset WANDB_PROJECT_3DMD to fall back to TensorBoard-only behavior.
+: "${WANDB_PROJECT_3DMD:=decovae-3dmeddiff}"
+: "${WANDB_RUN_NAME:=${EXP_NAME}}"
+# Stable run id keeps every SLURM requeue attached to the same W&B run.
+: "${WANDB_RUN_ID:=3dmd-${EXP_NAME}}"
+: "${WANDB_RESUME:=allow}"
+export WANDB_PROJECT_3DMD WANDB_RUN_NAME WANDB_RUN_ID WANDB_RESUME
+
 EXP_ROOT="/data/wonyoungjang/decodata/3d_meddiff/${EXP_NAME}"
 LOGS_DIR="${EXP_ROOT}/logs"
 mkdir -p "${LOGS_DIR}"

@@ -36,6 +36,7 @@ pip install -r external/3d_meddiff/requirements.txt
 - `requirements.patch` — upstream의 conda local `file://` 경로를 PyPI 핀으로 교체 + `cu121` PyPI extra-index 추가
 - `vqgan_4x.patch` — `VQGANDataset_4x`가 JSON에 `{"train": [...], "val": [...]}` 명시 split 스키마를 인식 + 디렉토리/파일 경로 양쪽 허용 (upstream은 디렉토리 + 끝 40개만 val로 가정). 추가로 `tio.RescaleIntensity(percentiles=(0.5, 99.5))`로 입력 정규화 ([0,1] → 이후 `*2-1` → [-1,1]). upstream의 `*2-1`은 [0,1] 입력을 가정하지만 실제 raw NIfTI는 [0,1800]+ 범위라 recon scale이 깨졌음. (sanity v2 215834에서 검증)
 - `patchvolume.patch` — `PatchVolumeAE.forward`의 val 경로에서 입력 텐서를 `patch_size`의 배수로 crop (UKB 218 등 비배수 axis 처리)
+- `wandb_logger.patch` — Lightning `WandbLogger`를 `TensorBoardLogger` 옆에 list로 추가. `WANDB_PROJECT_3DMD` env가 set일 때만 활성화 (없으면 TB-only 기존 동작 그대로). MAISI / DeCo-VAE 측 (`train_VAE.py`)와 동일한 W&B project에 baseline curve overlay 가능. launcher (`train_3d_meddiff.sh`)가 `WANDB_RUN_ID=3dmd-${EXP_NAME}` + `WANDB_RESUME=allow`를 export해서 SLURM requeue가 같은 run에 이어 log.
 
 ## Data bridge
 

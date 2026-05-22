@@ -1,0 +1,42 @@
+--- a/train/train_PatchVolume.py
++++ b/train/train_PatchVolume.py
+@@ -6,7 +6,7 @@
+ sys.path.append(project_root)
+ import pytorch_lightning as pl
+ from pytorch_lightning.callbacks import ModelCheckpoint
+-from pytorch_lightning.loggers import TensorBoardLogger
++from pytorch_lightning.loggers import TensorBoardLogger, WandbLogger
+ from torch.utils.data import DataLoader
+ from AutoEncoder.model.PatchVolume import patchvolumeAE
+ from train.callbacks import VolumeLogger
+@@ -60,7 +60,20 @@
+ 
+ 
+ 
+-    logger = TensorBoardLogger(cfg.model.default_root_dir, name="my_model")
++    # DecoVAE patch: TensorBoard always, plus W&B when WANDB_PROJECT_3DMD is
++    # set so the 3D MedDiff baseline curves can sit next to MAISI/SID/VAD.
++    tb_logger = TensorBoardLogger(cfg.model.default_root_dir, name="my_model")
++    loggers = [tb_logger]
++    if os.environ.get("WANDB_PROJECT_3DMD"):
++        wandb_kwargs = {"project": os.environ["WANDB_PROJECT_3DMD"],
++                        "save_dir": cfg.model.default_root_dir}
++        for env_key, kwarg in (("WANDB_ENTITY", "entity"),
++                               ("WANDB_RUN_NAME", "name"),
++                               ("WANDB_RUN_ID", "id"),
++                               ("WANDB_RESUME", "resume")):
++            if os.environ.get(env_key):
++                wandb_kwargs[kwarg] = os.environ[env_key]
++        loggers.append(WandbLogger(**wandb_kwargs))
+     trainer = pl.Trainer(
+         accelerator='gpu',
+         devices=cfg.model.gpus,
+@@ -72,7 +85,7 @@
+         precision=cfg.model.precision,
+         check_val_every_n_epoch=2,
+         num_sanity_val_steps = 2,
+-        logger=logger
++        logger=loggers
+     )
+ 
+     if cfg.model.resume_from_checkpoint and os.path.exists(cfg.model.resume_from_checkpoint):
