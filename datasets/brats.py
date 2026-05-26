@@ -33,11 +33,22 @@ class BraTSAdapter(DatasetAdapter):
     modality = "mri"
 
     def extract_subject_id(self, image_path: str) -> str:
-        # ``BraTS-GLI-00048-000-t1n.nii.gz`` → ``BraTS-GLI-00048-000`` (strip
-        # the modality suffix introduced by Synapse). The parent directory name
-        # carries the same id, but parsing the filename keeps us independent of
-        # how the manifest was laid out.
-        stem = os.path.basename(image_path).split(".nii")[0]
+        # Source modality file:
+        #   ``BraTS-GLI-00048-000-t1n.nii.gz`` → ``BraTS-GLI-00048-000`` (strip
+        #   the modality suffix introduced by Synapse).
+        # Embedding sidecar file (must round-trip the *full* id, not strip it):
+        #   ``BraTS-GLI-00048-000_emb.nii.gz`` → ``BraTS-GLI-00048-000``
+        # Without the embedding branch, ``rsplit("-", 1)`` would chop the
+        # ``-000`` session token (e.g. ``BraTS-GLI-00048``), so the metadata
+        # json matcher in extract_emb.py silently drops every case.
+        stem = os.path.basename(image_path)
+        for ext in (".nii.gz", ".nii", ".npy"):
+            if stem.endswith(ext):
+                stem = stem[: -len(ext)]
+                break
+        for suffix in ("_emb", "_mu", "_sigma"):
+            if stem.endswith(suffix):
+                return stem[: -len(suffix)]
         return stem.rsplit("-", 1)[0]
 
     def load_manifest(self, csv_path: str, data_dir: str,
