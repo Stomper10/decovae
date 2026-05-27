@@ -27,6 +27,13 @@ SCRIPT_DIR="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/nul
 : "${AE_CKPT:=/data/wonyoungjang/decodata/3d_meddiff/ukb_c4/my_model/version_2/checkpoints/epoch=1685-step=300000-train/recon_loss=0.15.ckpt}"
 : "${NUM_IMAGES:=2500}"
 : "${NUM_SHARDS:=4}"
+# Intensity percentile for the base/recon volumes:
+#   NORM_LOWER=0.5 -> paired SSIM/PSNR/LPIPS (3D MedDiff native, §8)
+#   NORM_LOWER=0.0 -> rFID/gFID on the baseline-matched FID scale (compute_metric.sh)
+# Use a distinct EXP_NAME (e.g. ukb_c4_lower0) when changing this so the two
+# volume/feature/CSV sets don't clobber each other.
+: "${NORM_LOWER:=0.5}"
+: "${NORM_UPPER:=99.5}"
 
 EVAL_EXP="/data/wonyoungjang/decodata/3d_meddiff/${EXP_NAME}/recon_eval"
 VOL_DIR="${EVAL_EXP}/outputs/volumes"
@@ -52,6 +59,8 @@ for ((s = 0; s < NUM_SHARDS; s++)); do
         --ae-ckpt "${AE_CKPT}" \
         --out-dir "${VOL_DIR}" \
         --num-images "${NUM_IMAGES}" \
+        --norm-lower "${NORM_LOWER}" \
+        --norm-upper "${NORM_UPPER}" \
         --shard-index "${s}" \
         --num-shards "${NUM_SHARDS}" &
 done
@@ -62,15 +71,23 @@ echo "  base/recon counts: base=$(ls ${VOL_DIR}/base_*.nii.gz 2>/dev/null | wc -
 conda deactivate 2>/dev/null
 conda activate deco_v15
 echo "=== stage 2: LPIPS/PSNR/SSIM @ $(date) ==="
+: "${RUN_NAME:=3d_meddiff}"
+: "${QUALITY_CSV:=journal_plan/results_ukb_quality_3dmd.csv}"
 CUDA_VISIBLE_DEVICES=0 python -m scripts.eval_recon_metrics \
     --volumes-dir "${VOL_DIR}" \
-    --out-csv "journal_plan/results_ukb_quality_3dmd.csv" \
-    --run-name 3d_meddiff
+    --out-csv "${QUALITY_CSV}" \
+    --run-name "${RUN_NAME}"
 
 # -------- stage 3: rFID (needs RadImageNet weight) ---------------------------
 echo "=== stage 3: rFID @ $(date) ==="
 if [[ -n "${FEATURE_EXTRACTOR_PATH}" && -f "${FEATURE_EXTRACTOR_PATH}" ]]; then
     echo "  RadImageNet weight found -> computing rFID via compute_metric --phase fid"
+    # compute_metric --phase fid reads filelist_{real,recon}_${NUM_IMAGES}.txt
+    # (basenames relative to volumes/). The --phase generate step normally writes
+    # these; we generate recon volumes ourselves in stage 1, so build them here.
+    ( cd "${VOL_DIR}" && ls base_*.nii.gz  | sort > "${EVAL_EXP}/filelist_real_${NUM_IMAGES}.txt" \
+                      && ls recon_*.nii.gz | sort > "${EVAL_EXP}/filelist_recon_${NUM_IMAGES}.txt" )
+    echo "  filelists: real=$(wc -l < ${EVAL_EXP}/filelist_real_${NUM_IMAGES}.txt) recon=$(wc -l < ${EVAL_EXP}/filelist_recon_${NUM_IMAGES}.txt)"
     export MASTER_ADDR=127.0.0.1
     export MASTER_PORT=$((10000 + RANDOM % 50000))
     torchrun --nproc_per_node=4 --nnodes=1 --rdzv_backend=c10d \

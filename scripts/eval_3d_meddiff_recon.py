@@ -5,12 +5,21 @@ reconstruction) in compute_metric's volume layout, so the SAME metric code
 (LPIPS/PSNR/SSIM in deco_v15, rFID via compute_metric --phase fid) can score
 them identically to MAISI / L_SID / L_VAD.
 
-Fairness: the real `base` volume uses the EXACT compute_metric.build_transforms
+Fairness: the real `base` volume uses the compute_metric.build_transforms
 pipeline (Orientation -> percentile [0,1] -> trilinear resize to fid_resolution),
-so the real reference is processed identically to the MAISI eval. Only the model
-under test changes. Reconstruction uses the true VQ path (encode -> codebook
-quantize -> decode), at fid_resolution (128x256x128 for UKB) — the same eval
-resolution MAISI reconstructs at. 128/256/128 are multiples of patch_size=64.
+at fid_resolution (128x256x128 for UKB) — the same eval resolution MAISI
+reconstructs at. 128/256/128 are multiples of patch_size=64.
+
+Intensity normalization deviates from the dataset's `intensity_norm_metric`
+(lower=0.0) on purpose: the PatchVolume AE was trained — and its latents were
+extracted (scripts/extract_3d_meddiff_latents.py) — with
+tio.RescaleIntensity(percentiles=(0.5, 99.5)). Feeding it the lower=0.0
+normalization (true-min -> 0) leaves a ~0.044 background floor the VQ codebook
+maps to ~0 in the recon, which crushes whole-volume SSIM even though the
+foreground recon is faithful (fg corr ~0.99). We therefore normalize the base
+with the AE's training percentiles (0.5, 99.5) so base and recon share the same
+background level — self-consistent for measuring 3D MedDiff's recon fidelity.
+Reconstruction uses the true VQ path (encode -> codebook quantize -> decode).
 
 The PatchVolume AE was trained with heavy flip/rot90 augmentation, so it is
 orientation-robust; we feed the monai-layout volume directly (only [0,1]->[-1,1]).
@@ -36,16 +45,26 @@ sys.path.insert(0, _EXT)
 from AutoEncoder.model.PatchVolume import patchvolumeAE  # noqa: E402
 
 
-def build_transform(cfg):
-    """Replicates compute_metric.build_transforms (the `transform` branch)."""
-    inten = cfg["intensity_norm_metric"]
+def build_transform(cfg, norm_lower=0.5, norm_upper=99.5):
+    """compute_metric.build_transforms with a configurable intensity percentile.
+
+    Two regimes (see module docstring):
+      - norm_lower=0.5 (default): the AE's training intensity norm
+        (percentiles 0.5-99.5) -> background floor matches the recon's, giving a
+        faithful whole-volume SSIM/PSNR/LPIPS. Use for PAIRED reconstruction
+        metrics (3D MedDiff in its native operating space).
+      - norm_lower=0.0: the dataset's `intensity_norm_metric`, identical to how
+        MAISI/L_SID/L_VAD are scored in compute_metric.sh. Use for rFID/gFID so
+        the FID feature distribution (hence the FID scale) matches the baselines.
+        The lower=0.5 clip is destructive and deflates FID ~45x vs lower=0.0,
+        so distribution metrics MUST use lower=0.0 to be comparable.
+    """
     return Compose([
         LoadImaged(keys="image"),
         EnsureChannelFirstd(keys="image"),
         Orientationd(keys="image", axcodes=cfg["orientation_axcodes"]),
-        ScaleIntensityRangePercentilesd(keys="image", lower=inten["lower"],
-                                        upper=inten["upper"], b_min=inten["b_min"],
-                                        b_max=inten["b_max"], clip=inten.get("clip", True)),
+        ScaleIntensityRangePercentilesd(keys="image", lower=norm_lower, upper=norm_upper,
+                                        b_min=0.0, b_max=1.0, clip=True),
         Resized(keys=["image"], spatial_size=tuple(cfg["fid_resolution"]), mode="trilinear"),
         EnsureTyped(keys="image", dtype=torch.float32),
     ])
@@ -75,13 +94,18 @@ def main():
     ap.add_argument("--ae-ckpt", required=True)
     ap.add_argument("--out-dir", required=True, help="volumes dir (base_/recon_ saved here)")
     ap.add_argument("--num-images", type=int, default=2500)
+    ap.add_argument("--norm-lower", type=float, default=0.5,
+                    help="lower intensity percentile: 0.5 (paired, AE-native) | "
+                         "0.0 (rFID/gFID, baseline-matched scale)")
+    ap.add_argument("--norm-upper", type=float, default=99.5)
     ap.add_argument("--shard-index", type=int, default=0)
     ap.add_argument("--num-shards", type=int, default=1)
     args = ap.parse_args()
 
     with open(args.dataset_config) as f:
         cfg = json.load(f)
-    transform = build_transform(cfg)
+    transform = build_transform(cfg, norm_lower=args.norm_lower, norm_upper=args.norm_upper)
+    print(f"[recon] intensity norm percentiles=({args.norm_lower}, {args.norm_upper})", flush=True)
 
     df = pd.read_csv(args.base_csv)
     files = [{"image": os.path.join(args.data_dir, rel)} for rel in df["rel_path"]][: args.num_images]
