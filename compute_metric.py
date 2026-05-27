@@ -647,6 +647,28 @@ def run_fid(args, paths, device, local_rank, world_size):
     output_root_real = os.path.join(paths["features_root"], paths["real_features_dir"])
     output_root_synth = os.path.join(paths["features_root"], paths["synth_features_dir"])
 
+    # The fid phase reads filelist_{real,synth}_N.txt (basenames under
+    # volumes_dir), but the generate step only saves the volumes and never wrote
+    # these lists -> a bare `--phase fid` (or the fid leg of `--phase all`) died
+    # with FileNotFoundError. Build them here from whatever volumes exist (rank 0
+    # writes, all ranks wait at the barrier). A pre-existing filelist is kept
+    # as-is (e.g. a manually trimmed N=126 list), so this only fills the gap.
+    #   real  = base_*                 synth = recon_*            (real_vs_recon)
+    #                                         = gen_*_<postfix>*  (real_vs_gen)
+    if local_rank == 0:
+        synth_glob = ("recon_*.nii.gz" if args.eval_mode == "real_vs_recon"
+                      else f"gen_*_{args.postfix}.nii.gz")
+        for fl, pattern in ((paths["real_filelist"], "base_*.nii.gz"),
+                            (paths["synth_filelist"], synth_glob)):
+            if fl and not os.path.isfile(fl):
+                names = sorted(p.name for p in Path(dataset_root).glob(pattern))
+                with open(fl, "w") as f:
+                    f.write("\n".join(names) + ("\n" if names else ""))
+                logger.info(f"[fid] wrote {os.path.basename(fl)} "
+                            f"({len(names)} files matching {pattern})")
+    if dist.is_initialized():
+        dist.barrier()
+
     # ----- real -----
     with open(paths["real_filelist"]) as rf:
         real_lines = sorted(l.strip() for l in rf.readlines())[:args.num_images]
