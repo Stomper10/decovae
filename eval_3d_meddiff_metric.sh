@@ -34,6 +34,13 @@ SCRIPT_DIR="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/nul
 # volume/feature/CSV sets don't clobber each other.
 : "${NORM_LOWER:=0.5}"
 : "${NORM_UPPER:=99.5}"
+# NO_CLAMP=1 -> save recon unclamped (match MAISI/compute_metric save convention).
+# DEFAULT 1: clamping trims feature-distribution tails and deflated 3DMD rFID
+# 4.026 (clamped) -> 7.186 (unclamped) at 2500/lower=0.0. All baselines must
+# share the unclamped save convention or the rFID comparison is invalid
+# (decision §11, 2026-05-28). Set NO_CLAMP=0 only for diagnostics.
+: "${NO_CLAMP:=1}"
+NOCLAMP_ARG=""; [[ "${NO_CLAMP}" == "1" ]] && NOCLAMP_ARG="--no-clamp"
 
 EVAL_EXP="/data/wonyoungjang/decodata/3d_meddiff/${EXP_NAME}/recon_eval"
 VOL_DIR="${EVAL_EXP}/outputs/volumes"
@@ -61,6 +68,7 @@ for ((s = 0; s < NUM_SHARDS; s++)); do
         --num-images "${NUM_IMAGES}" \
         --norm-lower "${NORM_LOWER}" \
         --norm-upper "${NORM_UPPER}" \
+        ${NOCLAMP_ARG} \
         --shard-index "${s}" \
         --num-shards "${NUM_SHARDS}" &
 done

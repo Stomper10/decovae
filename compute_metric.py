@@ -87,6 +87,10 @@ def load_config():
     parser.add_argument("--phase", type=str, default="all",
                         choices=["generate", "fid", "all"])
     parser.add_argument("--num_images", type=int, default=2500)
+    parser.add_argument("--deterministic_recon", action="store_true",
+                        help="real_vs_recon: decode the posterior MEAN z=z_mu instead of "
+                             "the stochastic sample z=z_mu+eps*z_sigma (matches a deterministic "
+                             "recon; removes the sampling-noise asymmetry vs VQ models)")
     parser.add_argument("--postfix", type=str, default="30step")
     parser.add_argument("--seed", type=int, default=42)
 
@@ -331,8 +335,10 @@ def run_generation(args, paths, device, local_rank, world_size):
 
                 with torch.no_grad(), autocast(device_type="cuda", dtype=torch.float16, enabled=args.amp):
                     z_mu, z_sigma = autoencoder.encode(base_images)
-                    eps = torch.randn_like(z_sigma)
-                    z = z_mu + eps * z_sigma
+                    if args.deterministic_recon:
+                        z = z_mu
+                    else:
+                        z = z_mu + torch.randn_like(z_sigma) * z_sigma
                     reconstruction = autoencoder.decode(z)
 
                     save_wandb_style_xyz_plot(slice_transform(reconstruction.cpu()[0]), f"{i:04d}_recon", slice_dir)

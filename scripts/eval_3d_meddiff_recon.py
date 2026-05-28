@@ -98,6 +98,9 @@ def main():
                     help="lower intensity percentile: 0.5 (paired, AE-native) | "
                          "0.0 (rFID/gFID, baseline-matched scale)")
     ap.add_argument("--norm-upper", type=float, default=99.5)
+    ap.add_argument("--no-clamp", action="store_true",
+                    help="save recon WITHOUT clamping to [0,1] (match compute_metric/MAISI "
+                         "which saves the raw decoder output unclamped)")
     ap.add_argument("--shard-index", type=int, default=0)
     ap.add_argument("--num-shards", type=int, default=1)
     args = ap.parse_args()
@@ -127,7 +130,9 @@ def main():
             base01 = transform(files[i])["image"].unsqueeze(0).to(device)  # [1,1,Dx,Hy,Wz] in [0,1]
             with torch.no_grad():
                 x_recon = reconstruct(ae, base01 * 2.0 - 1.0)
-                recon01 = torch.clamp((x_recon + 1.0) / 2.0, 0.0, 1.0)
+                recon01 = (x_recon + 1.0) / 2.0
+                if not args.no_clamp:
+                    recon01 = torch.clamp(recon01, 0.0, 1.0)
             nib.save(nib.Nifti1Image(base01.cpu().numpy().squeeze().astype(np.float32), np.eye(4)), base_path)
             nib.save(nib.Nifti1Image(recon01.cpu().numpy().squeeze().astype(np.float32), np.eye(4)), recon_path)
         except Exception as e:  # noqa: BLE001

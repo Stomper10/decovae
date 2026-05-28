@@ -53,6 +53,9 @@ source "${SCRIPT_DIR}/scripts/resolve_dataset.sh"
 : "${OTHER_CSV:=${TRAIN_CSV}}"
 : "${DATASET_CFG:=configs/${DATASET}/dataset.json}"
 : "${NUM_GPUS:=4}"
+# DETERMINISTIC=1 -> real_vs_recon decodes z=z_mu (no posterior sampling noise)
+: "${DETERMINISTIC:=0}"
+DET_ARG=""; [[ "${DETERMINISTIC}" == "1" ]] && DET_ARG="--deterministic_recon"
 
 # ----------------------------------------------------------------------
 # Experiment directory tree + log
@@ -143,6 +146,7 @@ srun --cpu-bind=none,v --accel-bind=g torchrun \
       --eval_mode "${EVAL_MODE}" \
       --phase "${PHASE}" \
       --num_images "${NUM_IMAGES}" \
+      ${DET_ARG} \
       --postfix "${POSTFIX}" \
       --base_label_dir "${BASE_CSV}" \
       --other_label_dir "${OTHER_CSV}" \
