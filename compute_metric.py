@@ -776,14 +776,40 @@ def main():
 
     if local_rank == 0:
         print_config()
-        logger.info(f"Running on {device} (rank {local_rank}/{world_size})")
-        logger.info(f"exp_dir   : {args.exp_dir}")
-        logger.info(f"eval_mode : {args.eval_mode}")
-        logger.info(f"phase     : {args.phase}")
-        logger.info(f"num_images: {args.num_images}")
+        logger.info("=" * 72)
+        logger.info("RUN CONFIG (resolved args + hyperparams)")
+        logger.info("=" * 72)
+        logger.info(f"  running on        : {device} (rank {local_rank}/{world_size})")
+        logger.info(f"  exp_dir           : {args.exp_dir}")
+        logger.info(f"  eval_mode         : {args.eval_mode}")
+        logger.info(f"  phase             : {args.phase}")
+        logger.info(f"  num_images        : {args.num_images}")
+        logger.info(f"  seed              : {args.seed}")
+        logger.info("  -- checkpoints --")
+        logger.info(f"  pretrained_vae_path : {args.pretrained_vae_path}")
+        logger.info(f"  pretrained_unet_path: {args.pretrained_unet_path}")
+        logger.info("  -- generation / inference hyperparams --")
+        for k in ("num_inference_steps", "scale_factor", "global_mean",
+                  "stochastic_scale", "latent_channels", "latent_shape",
+                  "inference_spacing", "weight_dtype", "amp", "postfix"):
+            if hasattr(args, k):
+                logger.info(f"    {k:22s}: {getattr(args, k)}")
+        logger.info("  -- preprocessing / resolution --")
+        for k in ("resolution", "orientation_axcodes", "fid_resolution",
+                  "fid_target_shape", "intensity_norm_metric"):
+            if hasattr(args, k):
+                logger.info(f"    {k:22s}: {getattr(args, k)}")
+        logger.info("  -- FID params --")
+        for k in ("fid_model_name", "fid_resampling_spacing",
+                  "fid_center_slices_ratio", "fid_padding",
+                  "fid_center_cropping", "fid_ignore_existing"):
+            if hasattr(args, k):
+                logger.info(f"    {k:22s}: {getattr(args, k)}")
+        logger.info("  -- paths --")
         for k in ("volumes_dir", "slices_dir", "features_root",
                   "real_filelist", "synth_filelist", "synth_features_dir"):
-            logger.info(f"  {k:18s}: {paths[k]}")
+            logger.info(f"    {k:22s}: {paths[k]}")
+        logger.info("=" * 72)
 
     set_determinism(seed=args.seed)
 
