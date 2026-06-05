@@ -1,0 +1,10 @@
+{
+    "data_base_dir": "",
+    "embedding_base_dir": "./embeddings",
+    "json_data_list": "./train_files.json",
+    "val_json_data_list": "./valid_files.json",
+    "model_dir": "./weights/unet",
+    "model_filename": "model.pt",
+    "trained_autoencoder_path": "",
+    "existing_ckpt_filepath": null
+}

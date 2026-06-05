@@ -55,6 +55,14 @@
 # export BRATS_VALID_CSV=/path/to/csv_files/brats_valid.csv
 # export BRATS_OUTPUT_ROOT=/path/to/outputs/brats
 
+# POOLED foundation corpus (multi-cohort). DATA_DIR is the offline .npy cache
+# root (scripts/preprocess_cache.py); CSV is the pooled manifest. The pooled
+# adapter loads already-preprocessed cache volumes (configs/pooled: cached_input).
+# export POOLED_DATA_DIR=/path/to/decovae_cache
+# export POOLED_TRAIN_CSV=/path/to/csv_files/pooled_manifest_train.csv
+# export POOLED_VALID_CSV=/path/to/csv_files/pooled_manifest_valid.csv
+# export POOLED_OUTPUT_ROOT=/path/to/outputs/pooled
+
 # --- W&B (optional) ----------------------------------------------------------
 # Set your Weights & Biases entity (team or user).
 # Leave unset to disable W&B logging or run in offline mode.

@@ -116,6 +116,8 @@ def load_config():
                         help="Stage base directory. Required (passed by launcher).")
     parser.add_argument("--wandb_entity", type=str, default=None,
                         help="W&B entity. Overrides dataset.wandb_entity.")
+    parser.add_argument("--train_label_dir", type=str, default=None,
+                        help="Pooled manifest CSV (only used for pooled imbalance sampling).")
     args = parser.parse_args()
 
     if args.resume and not args.run_name:
@@ -252,7 +254,46 @@ def load_filenames(data_list_path: str, data_key: str, adapter) -> list:
             for item in filenames]
 
 
-def prepare_transform(include_body_region: bool = False):
+class TokenSetCondLoader:
+    """Reads the per-volume typed-token JSON ``cond`` dict and emits fixed-slot
+    tensors: ``cond_cat`` (n_cat long), ``cond_cont`` (n_cont float, [0,1]-normed),
+    ``cond_presence`` (n_attr bool, cats-then-conts). Absent value → presence
+    False (NOT a fake 0). Order matches TokenSetEncoder."""
+
+    def __init__(self, attributes: list[dict]):
+        self.attributes = attributes
+
+    def __call__(self, data):
+        from patches.token_set_encoder import encode_token_set
+        d = dict(data)
+        with open(d["cond"]) as f:
+            cond = json.load(f)["cond"]
+        cat_idx, cont_val, pres = encode_token_set(cond, self.attributes)
+        d["cond_cat"] = torch.tensor(cat_idx, dtype=torch.long)
+        d["cond_cont"] = torch.tensor(cont_val, dtype=torch.float32)
+        d["cond_presence"] = torch.tensor(pres, dtype=torch.bool)
+        return d
+
+
+def cfg_drop_presence(presence, full_p, token_p, keep_idx=(0,)):
+    """Classifier-free-guidance dropout on the presence mask (training only).
+    Whole-set drop (→ null) with prob full_p; independent per-token drop with
+    prob token_p on every slot EXCEPT keep_idx (modality at index 0). Operates
+    only on already-present tokens — never fabricates absent ones."""
+    pres = presence.clone()
+    B, n = pres.shape
+    if token_p > 0:
+        drop = torch.rand(B, n, device=pres.device) < token_p
+        for k in keep_idx:
+            drop[:, k] = False
+        pres = pres & ~drop
+    if full_p > 0:
+        whole = torch.rand(B, device=pres.device) < full_p
+        pres[whole] = False
+    return pres
+
+
+def prepare_transform(include_body_region: bool = False, cond_attributes=None):
     def _load_data_from_file(file_path, key):
         with open(file_path) as f:
             return torch.FloatTensor(json.load(f)[key])
@@ -262,9 +303,16 @@ def prepare_transform(include_body_region: bool = False):
         monai.transforms.EnsureChannelFirstd(keys=["image"]),
         monai.transforms.Lambdad(keys="spacing", func=lambda x: _load_data_from_file(x, "spacing")),
         monai.transforms.Lambdad(keys="spacing", func=lambda x: x * 1e2),
-        monai.transforms.Lambdad(keys="cond", func=lambda x: _load_data_from_file(x, "cond")),
-        monai.transforms.Lambdad(keys="cond", func=lambda x: torch.tensor([x[0]], dtype=torch.float32)),
     ]
+    if cond_attributes is not None:
+        # typed token-set: dict cond → fixed-slot cat/cont/presence tensors
+        data_transforms_list.append(TokenSetCondLoader(cond_attributes))
+    else:
+        # legacy: scalar age conditioning (cond[0]) — MIUA / per-cohort path
+        data_transforms_list += [
+            monai.transforms.Lambdad(keys="cond", func=lambda x: _load_data_from_file(x, "cond")),
+            monai.transforms.Lambdad(keys="cond", func=lambda x: torch.tensor([x[0]], dtype=torch.float32)),
+        ]
     if include_body_region:
         data_transforms_list += [
             monai.transforms.Lambdad(keys="top_region_index",
@@ -313,8 +361,21 @@ def main():
     adapter = get_adapter(args.dataset_adapter)
     device = torch.device(f"cuda:{local_rank}")
 
+    # bf16: autocast on, no GradScaler (only fp16 needs loss scaling).
+    wd = getattr(args, "weight_dtype", "fp16")
+    amp_dtype = torch.bfloat16 if wd == "bf16" else torch.float16
+    use_scaler = args.amp and amp_dtype == torch.float16
+    # Typed token-set conditioning (pooled). enabled=false / absent → legacy
+    # (1-D meta) or unconditional path — preserves MIUA reproducibility.
+    cond_cfg = getattr(args, "conditioning", None)
+    use_token_set = bool(cond_cfg) and bool(cond_cfg.get("enabled", False))
+    cfg_full_p = float(cond_cfg.get("cfg_drop_prob", 0.0)) if use_token_set else 0.0
+    cfg_token_p = float(cond_cfg.get("per_token_drop_prob", 0.0)) if use_token_set else 0.0
+
     if rank == 0:
         print(f"[Opt] Using gradient accumulation with {args.gradient_accumulation_steps} steps.")
+        print(f"[Cond] use_token_set={use_token_set} weight_dtype={wd} "
+              f"(cfg_full={cfg_full_p}, cfg_token={cfg_token_p})")
 
     set_determinism(seed=args.seed + rank)
     torch.backends.cuda.matmul.allow_tf32 = True
@@ -382,12 +443,28 @@ def main():
         print(f"Total number of training data is {len(train_files)}.")
         print(f"Total number of validation data is {len(valid_files)}.")
 
-    data_transform = prepare_transform(include_body_region=include_body_region)
+    data_transform = prepare_transform(
+        include_body_region=include_body_region,
+        cond_attributes=cond_cfg["attributes"] if use_token_set else None,
+    )
 
     workers_per_gpu = args.cpus_per_task // world_size
     train_dataset = CacheDataset(data=train_files, transform=data_transform,
                                  cache_rate=args.cache_rate, num_workers=workers_per_gpu)
-    train_sampler = DistributedSampler(dataset=train_dataset, shuffle=True)
+    if (getattr(args, "imbalance_sampling", False) and args.dataset_adapter == "pooled"
+            and getattr(args, "train_label_dir", None)):
+        from datasets.sampling import DistributedWeightedSampler, temperature_weights
+        tau = float(getattr(args, "sampling_tau", 0.5))
+        sid2cell = adapter.sid_to_cell(args.train_label_dir, "diffusion")  # cohort×modality×dx
+        cells = [sid2cell.get(adapter.extract_subject_id(it["image"]), "na") for it in train_files]
+        weights = temperature_weights(cells, tau)
+        train_sampler = DistributedWeightedSampler(weights, world_size, rank, seed=args.seed)
+        if rank == 0:
+            from collections import Counter
+            print(f"[Sampler] imbalance τ={tau}, {len(set(cells))} diffusion cells "
+                  f"(cohort×modality×dx); cell sizes={dict(Counter(cells))}")
+    else:
+        train_sampler = DistributedSampler(dataset=train_dataset, shuffle=True)
     train_loader = DataLoader(
         train_dataset, batch_size=args.batch_size, num_workers=workers_per_gpu,
         sampler=train_sampler, pin_memory=True, drop_last=True,
@@ -414,7 +491,7 @@ def main():
     total_opt_steps = (args.max_train_steps - args.pretrained_steps + args.gradient_accumulation_steps - 1) // args.gradient_accumulation_steps
     if rank == 0: print("total_opt_steps:", total_opt_steps)
     lr_scheduler = torch.optim.lr_scheduler.PolynomialLR(optimizer, total_iters=total_opt_steps, power=2.0)
-    scaler = GradScaler() if args.amp else None
+    scaler = GradScaler() if use_scaler else None
     if args.loss_type == "l1":
         loss_pt = torch.nn.L1Loss()
     elif args.loss_type == "l2":
@@ -470,9 +547,18 @@ def main():
         if include_modality:
             modality_tensor = torch.ones((len(images),), dtype=torch.long).to(device)
         spacing_tensor = batch["spacing"].to(device, non_blocking=True)
-        meta_tensor = batch["cond"].to(device, non_blocking=True)
+        if use_token_set:
+            presence = cfg_drop_presence(
+                batch["cond_presence"].to(device, non_blocking=True), cfg_full_p, cfg_token_p)
+            meta_tensor = {
+                "cond_cat": batch["cond_cat"].to(device, non_blocking=True),
+                "cond_cont": batch["cond_cont"].to(device, non_blocking=True),
+                "cond_presence": presence,
+            }
+        else:
+            meta_tensor = batch["cond"].to(device, non_blocking=True)
 
-        with autocast(device_type="cuda", dtype=torch.float16, enabled=args.amp):
+        with autocast(device_type="cuda", dtype=amp_dtype, enabled=args.amp):
             noise = torch.randn_like(images)
 
             if isinstance(noise_scheduler, RFlowScheduler):
@@ -513,13 +599,13 @@ def main():
             loss = loss_pt(model_output.float(), model_gt.float())
             loss = loss / args.gradient_accumulation_steps
 
-        if args.amp:
+        if use_scaler:
             scaler.scale(loss).backward()
         else:
             loss.backward()
 
         if (step + 1) % args.gradient_accumulation_steps == 0:
-            if args.amp:
+            if use_scaler:
                 scaler.unscale_(optimizer)
                 clip_grad_norm_(unet.parameters(), 1.0)
                 scaler.step(optimizer)
@@ -555,8 +641,16 @@ def main():
                 for val_batch in valid_loader:
                     val_images = (val_batch["image"].to(device, non_blocking=True) - global_mean) * scale_factor
                     spacing_tensor = val_batch["spacing"].to(device, non_blocking=True)
-                    meta_tensor = val_batch["cond"].to(device, non_blocking=True)
-                    with autocast(device_type="cuda", dtype=torch.float16, enabled=args.amp):
+                    if use_token_set:
+                        # no CFG drop at validation — use the true token set
+                        meta_tensor = {
+                            "cond_cat": val_batch["cond_cat"].to(device, non_blocking=True),
+                            "cond_cont": val_batch["cond_cont"].to(device, non_blocking=True),
+                            "cond_presence": val_batch["cond_presence"].to(device, non_blocking=True),
+                        }
+                    else:
+                        meta_tensor = val_batch["cond"].to(device, non_blocking=True)
+                    with autocast(device_type="cuda", dtype=amp_dtype, enabled=args.amp):
                         noise = torch.randn_like(val_images)
                         timesteps = torch.randint(0, num_train_timesteps, (val_images.shape[0],), device=val_images.device).long()
                         noisy_latent = noise_scheduler.add_noise(original_samples=val_images, noise=noise, timesteps=timesteps)
@@ -624,7 +718,7 @@ def main():
                         "global_mean": global_mean,
                         "epoch": current_epoch,
                     }
-                    if args.amp:
+                    if use_scaler:
                         state["scaler"] = scaler.state_dict()
 
                     best_dir = os.path.join(weights_unet_dir, "best-checkpoint")
@@ -657,7 +751,7 @@ def main():
                 "global_mean": global_mean,
                 "epoch": current_epoch,
             }
-            if args.amp:
+            if use_scaler:
                 state["scaler"] = scaler.state_dict()
 
             ckpt_dir = os.path.join(weights_unet_dir, f"checkpoint-{step}")

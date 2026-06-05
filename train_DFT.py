@@ -223,7 +223,14 @@ def main():
     args = load_config()
     adapter = get_adapter(args.dataset_adapter)
     device = torch.device(f"cuda:{local_rank}")
-    weight_dtype = torch.float16 if args.weight_dtype == "fp16" else torch.float32
+    if args.weight_dtype == "fp16":
+        weight_dtype, amp_dtype = torch.float16, torch.float16
+    elif args.weight_dtype == "bf16":
+        weight_dtype, amp_dtype = torch.bfloat16, torch.bfloat16
+    else:
+        weight_dtype, amp_dtype = torch.float32, torch.float16
+    # bf16 autocast needs no gradient scaling; only fp16 does.
+    use_scaler = args.amp and amp_dtype == torch.float16
 
     set_determinism(seed=args.seed + rank)
     torch.backends.cuda.matmul.allow_tf32 = True
@@ -254,6 +261,7 @@ def main():
     train_files = adapter.load_manifest(args.train_label_dir, args.data_dir)
     val_files = adapter.load_manifest(args.valid_label_dir, args.data_dir, n=args.num_valid)
 
+    cached_input = getattr(args, "cached_input", False)
     train_transform = VAE_Transform(
         is_train=True, random_aug=args.random_aug, k=4,
         patch_size=args.patch_size, output_dtype=weight_dtype,
@@ -262,6 +270,7 @@ def main():
         intensity_norm=args.intensity_norm,
         orientation_axcodes=args.orientation_axcodes,
         select_channel=args.select_channel,
+        cached=cached_input,
     )
     val_transform = VAE_Transform(
         is_train=False, random_aug=False, k=4,
@@ -270,6 +279,7 @@ def main():
         intensity_norm=args.intensity_norm,
         orientation_axcodes=args.orientation_axcodes,
         select_channel=args.select_channel,
+        cached=cached_input,
     )
 
     workers_per_gpu = args.cpus_per_task // world_size 
@@ -329,7 +339,7 @@ def main():
     total_opt_steps = (args.max_train_steps - args.pretrained_steps + args.gradient_accumulation_steps - 1) // args.gradient_accumulation_steps
     scheduler_g = lr_scheduler.CosineAnnealingLR(optimizer_g, T_max=total_opt_steps)
     scheduler_d = lr_scheduler.CosineAnnealingLR(optimizer_d, T_max=total_opt_steps)
-    scaler_g, scaler_d = (GradScaler(), GradScaler()) if args.amp else (None, None)
+    scaler_g, scaler_d = (GradScaler(), GradScaler()) if use_scaler else (None, None)
 
     start_step, best_val_loss, start_epoch = 0, float("inf"), 0
     if args.resume:
@@ -360,7 +370,7 @@ def main():
             scheduler_g.load_state_dict(checkpoint["scheduler_g"])
             scheduler_d.load_state_dict(checkpoint["scheduler_d"])
             
-            if args.amp and "scaler_g" in checkpoint:
+            if use_scaler and "scaler_g" in checkpoint:
                 scaler_g.load_state_dict(checkpoint["scaler_g"])
                 scaler_d.load_state_dict(checkpoint["scaler_d"])
             
@@ -423,7 +433,7 @@ def main():
         images = batch["image"].to(device, non_blocking=True).contiguous()
 
         # [MODIFIED] Pass latent_noise_scale to the forward pass
-        with autocast(device_type="cuda", dtype=torch.float16, enabled=args.amp):
+        with autocast(device_type="cuda", dtype=amp_dtype, enabled=args.amp):
             reconstruction, z_mu, z_sigma = autoencoder(images, noise_scale=args.latent_noise_scale)
             
             recons_loss = intensity_loss(reconstruction, images)
@@ -454,12 +464,12 @@ def main():
                 loss_g += losses["lc_loss"]
             loss_g = loss_g / args.gradient_accumulation_steps
             
-        if args.amp:
+        if use_scaler:
             scaler_g.scale(loss_g).backward()
         else:
             loss_g.backward()
 
-        with autocast(device_type="cuda", dtype=torch.float16, enabled=args.amp):
+        with autocast(device_type="cuda", dtype=amp_dtype, enabled=args.amp):
             logits_fake = discriminator(reconstruction.contiguous().detach())[-1]
             loss_d_fake = adv_loss(logits_fake, target_is_real=False, for_discriminator=True)
             logits_real = discriminator(images.contiguous().detach())[-1]
@@ -467,13 +477,13 @@ def main():
             loss_d = (loss_d_fake + loss_d_real) * args.disc_weight 
             loss_d = loss_d / args.gradient_accumulation_steps
 
-        if args.amp:
+        if use_scaler:
             scaler_d.scale(loss_d).backward()
         else:
             loss_d.backward()
 
         if (step + 1) % args.gradient_accumulation_steps == 0:
-            if args.amp:
+            if use_scaler:
                 scaler_g.unscale_(optimizer_g)
                 clip_grad_norm_(autoencoder.parameters(), 1.0)
                 scaler_g.step(optimizer_g)
@@ -484,7 +494,7 @@ def main():
             scheduler_g.step()
             optimizer_g.zero_grad(set_to_none=True)
 
-            if args.amp:
+            if use_scaler:
                 scaler_d.unscale_(optimizer_d)
                 clip_grad_norm_(discriminator.parameters(), 1.0)
                 scaler_d.step(optimizer_d)
@@ -536,7 +546,7 @@ def main():
             with torch.no_grad():
                 for val_batch in dataloader_val:
                     val_images = val_batch["image"].to(device)
-                    with autocast(device_type="cuda", dtype=torch.float16, enabled=args.amp):
+                    with autocast(device_type="cuda", dtype=amp_dtype, enabled=args.amp):
                         # [MODIFIED] Using module to bypass DDP, assuming dynamic_infer handles the rest.
                         # Validation can usually run with scale=1.0 or user-defined.
                         reconstruction, z_mu_val, z_sigma_val = dynamic_infer(val_inferer, autoencoder.module, val_images)
@@ -608,7 +618,7 @@ def main():
                         "best_val_loss": best_val_loss,
                         "epoch": current_epoch
                     }
-                    if args.amp:
+                    if use_scaler:
                         state["scaler_g"] = scaler_g.state_dict()
                         state["scaler_d"] = scaler_d.state_dict()
                     best_dir = os.path.join(weights_vae_dir, "best-checkpoint")
@@ -637,7 +647,7 @@ def main():
                 "best_val_loss": float(best_val_loss),
                 "epoch": current_epoch
             }
-            if args.amp:
+            if use_scaler:
                 state["scaler_g"] = scaler_g.state_dict()
                 state["scaler_d"] = scaler_d.state_dict()
             ckpt_dir = os.path.join(weights_vae_dir, f"checkpoint-{step}")

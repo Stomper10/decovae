@@ -1,0 +1,42 @@
+{
+    "dataset_adapter": "pooled",
+    "modality": "mri",
+    "wandb_project_vae": "VAE_POOLED",
+    "wandb_project_dft": "VAE_POOLED_Decoder_FT",
+    "wandb_project_unet": "UNET_POOLED",
+    "wandb_entity": null,
+
+    "data_dir": null,
+    "train_label_dir": null,
+    "valid_label_dir": null,
+
+    "cached_input": true,
+    "imbalance_sampling": true,
+    "sampling_tau": 0.5,
+    "resolution": [192, 192, 192],
+    "orientation_axcodes": "RAS",
+    "intensity_norm": {
+        "type": "percentile",
+        "lower": 0.0,
+        "upper": 99.5,
+        "b_min": 0.0,
+        "b_max": 1.0,
+        "clip": false
+    },
+    "intensity_norm_metric": {
+        "type": "percentile",
+        "lower": 0.0,
+        "upper": 99.5,
+        "b_min": 0.0,
+        "b_max": 1.0,
+        "clip": true
+    },
+    "select_channel": 0,
+
+    "latent_shape": [48, 48, 48],
+    "fid_resolution": [192, 192, 192],
+    "fid_target_shape": "192x192x192",
+    "inference_spacing": [1.0, 1.0, 1.0],
+
+    "feature_extractor_path": null
+}

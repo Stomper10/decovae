@@ -82,6 +82,7 @@ class DiffusionModelUNetMaisiV2(DiffusionModelUNetMaisi):
         include_spacing_input: bool = False,
         include_meta_input: bool = False,
         use_checkpointing: bool = False,
+        conditioning: dict | None = None,
     ) -> None:
         # Skip DiffusionModelUNetMaisi.__init__ — go directly to nn.Module — because we need
         # `new_time_embed_dim` to include the meta dim before constructing down/mid/up blocks.
@@ -172,6 +173,22 @@ class DiffusionModelUNetMaisiV2(DiffusionModelUNetMaisi):
             new_time_embed_dim += time_embed_dim
         if self.include_meta_input:
             self.meta_layer = self._create_embedding_module(1, time_embed_dim)
+            new_time_embed_dim += time_embed_dim
+
+        # Typed token-set conditioning (pooled foundation model). Alternative to
+        # the legacy 1-D meta_layer — like it, the encoded vector is concatenated
+        # to the time-embedding. `conditioning.enabled=false` (or absent) → no
+        # encoder → fully unconditional / legacy path (MIUA reproducibility).
+        self.conditioning = conditioning
+        self.use_token_set = bool(conditioning) and bool(conditioning.get("enabled", False))
+        if self.use_token_set:
+            from patches.token_set_encoder import TokenSetEncoder
+            self.token_encoder = TokenSetEncoder(
+                attributes=conditioning["attributes"],
+                cond_dim=int(conditioning.get("cond_dim", 256)),
+                output_dim=time_embed_dim,
+                pool=conditioning.get("pool", "mean"),
+            )
             new_time_embed_dim += time_embed_dim
 
         self.down_blocks = nn.ModuleList([])
@@ -282,6 +299,10 @@ class DiffusionModelUNetMaisiV2(DiffusionModelUNetMaisi):
             emb = torch.cat((emb, self.spacing_layer(spacing)), dim=1)
         if self.include_meta_input:
             emb = torch.cat((emb, self.meta_layer(meta)), dim=1)
+        if self.use_token_set:
+            # `meta` here is a dict {cond_cat, cond_cont, cond_presence}.
+            tok = self.token_encoder(meta["cond_cat"], meta["cond_cont"], meta["cond_presence"])
+            emb = torch.cat((emb, tok), dim=1)
         return emb
 
     def _apply_down_blocks(self, h, emb, context, down_block_additional_residuals):

@@ -56,11 +56,40 @@ source "${SCRIPT_DIR}/scripts/resolve_dataset.sh"
 # DETERMINISTIC=1 -> real_vs_recon decodes z=z_mu (no posterior sampling noise)
 : "${DETERMINISTIC:=0}"
 DET_ARG=""; [[ "${DETERMINISTIC}" == "1" ]] && DET_ARG="--deterministic_recon"
+# D2: evaluation precision. fp32 + no-amp = reproducible FID (default).
+: "${WEIGHT_DTYPE:=fp32}"
+: "${NO_AMP:=1}"
+AMP_ARG=""; [[ "${NO_AMP}" == "1" ]] && AMP_ARG="--no_amp"
+# CELL (pooled only): restrict the real/conditioning set to one cohort×modality
+# cell "cohort_modality" (e.g. adni_FLAIR) → per-(modality×cohort) FID. Outputs
+# are namespaced under cells/<CELL> so independent cells don't collide; run one
+# sbatch per cell (loop). Empty = whole base CSV (single pooled FID).
+: "${CELL:=}"
 
 # ----------------------------------------------------------------------
 # Experiment directory tree + log
 # ----------------------------------------------------------------------
-EXP_DIR="${OUTPUT_DIR_BASE}/${EXP_NAME}"
+# Weights / latent-stats always live under the main experiment dir; per-cell
+# evaluation only namespaces the OUTPUT dir (volumes/features/filelists).
+MAIN_EXP_DIR="${OUTPUT_DIR_BASE}/${EXP_NAME}"
+if [[ -n "${CELL}" ]]; then
+    # write a per-cell base CSV (filter cohort×modality) and isolate outputs
+    CELL_COHORT="${CELL%_*}"; CELL_MOD="${CELL##*_}"
+    CELL_CSV="${MAIN_EXP_DIR}/cells/${CELL}/base_${CELL}.csv"
+    mkdir -p "$(dirname "${CELL_CSV}")"
+    python3 - <<PY
+import pandas as pd
+df = pd.read_csv("${BASE_CSV}")
+df = df[(df["cohort"]=="${CELL_COHORT}") & (df["modality"]=="${CELL_MOD}")]
+df.to_csv("${CELL_CSV}", index=False)
+print(f"[compute_metric.sh] CELL ${CELL}: {len(df)} real volumes -> ${CELL_CSV}")
+PY
+    BASE_CSV="${CELL_CSV}"
+    POSTFIX="${POSTFIX}_${CELL}"
+    EXP_DIR="${MAIN_EXP_DIR}/cells/${CELL}"
+else
+    EXP_DIR="${MAIN_EXP_DIR}"
+fi
 LOGS_DIR="${EXP_DIR}/logs"
 mkdir -p "${LOGS_DIR}" \
          "${EXP_DIR}/outputs/volumes" \
@@ -93,7 +122,7 @@ echo "  num_gpus   : ${NUM_GPUS}"
 # Compose CLI args
 # ----------------------------------------------------------------------
 UNET_EXP_DIR="${OUTPUT_DIR_BASE}/${UNET_EXP_NAME}"
-VAE_PATH="${EXP_DIR}/weights/vae/${VAE_CKPT_NAME}"
+VAE_PATH="${MAIN_EXP_DIR}/weights/vae/${VAE_CKPT_NAME}"
 UNET_PATH="${UNET_EXP_DIR}/weights/unet/${UNET_CKPT_NAME}"
 
 # compute_metric.py expects --config_path to contain top-level model defs
@@ -147,6 +176,8 @@ srun --cpu-bind=none,v --accel-bind=g torchrun \
       --phase "${PHASE}" \
       --num_images "${NUM_IMAGES}" \
       ${DET_ARG} \
+      ${AMP_ARG} \
+      --weight_dtype "${WEIGHT_DTYPE}" \
       --postfix "${POSTFIX}" \
       --base_label_dir "${BASE_CSV}" \
       --other_label_dir "${OTHER_CSV}" \

@@ -18,9 +18,10 @@ case "${DATASET}" in
     ukb_20252) _DS_PREFIX=UKB ;;
     ixi)       _DS_PREFIX=IXI ;;
     brats)     _DS_PREFIX=BRATS ;;
+    pooled)    _DS_PREFIX=POOLED ;;
     *)
         echo "[resolve_dataset] Unknown DATASET='${DATASET}'." >&2
-        echo "  Expected one of: ukb_20252 | ixi | brats" >&2
+        echo "  Expected one of: ukb_20252 | ixi | brats | pooled" >&2
         return 1 2>/dev/null || exit 1
         ;;
 esac

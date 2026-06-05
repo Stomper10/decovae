@@ -131,6 +131,7 @@ srun --cpu-bind=none,v --accel-bind=g torchrun \
       --wandb_entity "${WANDB_ENTITY}" \
       --run_name "${EXP_NAME}" \
       --cpus_per_task "${SLURM_CPUS_PER_TASK}" \
+      --train_label_dir "${TRAIN_CSV}" \
       ${RESUME_FLAG} &
 wait
 exit 0

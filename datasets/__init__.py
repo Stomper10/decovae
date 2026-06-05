@@ -14,11 +14,13 @@ from __future__ import annotations
 from .base import DatasetAdapter
 from .brats import BraTSAdapter
 from .ixi import IXIAdapter
+from .pooled import PooledAdapter
 from .ukb_20252 import UKB20252Adapter
 
 _REGISTRY: dict[str, type[DatasetAdapter]] = {
     "brats": BraTSAdapter,
     "ixi": IXIAdapter,
+    "pooled": PooledAdapter,
     "ukb_20252": UKB20252Adapter,
 }
 

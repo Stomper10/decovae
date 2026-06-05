@@ -265,17 +265,37 @@ def load_data_lists(args, adapter):
                                             n=args.num_images)
 
     if args.eval_mode == "real_vs_gen":
-        meta_values = adapter.meta_value_distribution(args.num_images, args.seed)
-        if meta_values is None:
-            np.random.seed(args.seed)
-            meta_values = np.random.uniform(0.0, 1.0, args.num_images)
+        cond_cfg = getattr(args, "conditioning", None)
+        if cond_cfg and cond_cfg.get("enabled", False):
+            # Typed token-set: condition generation on real token-sets sampled
+            # (with replacement) from base_label_dir. When base CSV is a single
+            # cell (cohort×modality[×dx]) the generated set matches that cell's
+            # real metadata distribution → per-cell gFID.
+            df = adapter.normalize_label_df(pd.read_csv(args.base_label_dir))
+            rng = np.random.default_rng(args.seed)
+            idx = rng.integers(0, len(df), args.num_images)
+            meta_values = [adapter.derive_conditions(df.iloc[int(j)]) for j in idx]
+        else:
+            meta_values = adapter.meta_value_distribution(args.num_images, args.seed)
+            if meta_values is None:
+                np.random.seed(args.seed)
+                meta_values = np.random.uniform(0.0, 1.0, args.num_images)
 
     return base_files, other_files, meta_values
 
 
 def run_generation(args, paths, device, local_rank, world_size):
     adapter = get_adapter(args.dataset_adapter)
-    weight_dtype = torch.float16 if args.weight_dtype == "fp16" else torch.float32
+    # D2: eval defaults to fp32 (weight_dtype). amp_dtype only matters when --amp
+    # is left on; with --no_amp (fp32 eval) autocast is disabled regardless.
+    if args.weight_dtype == "fp16":
+        weight_dtype, amp_dtype = torch.float16, torch.float16
+    elif args.weight_dtype == "bf16":
+        weight_dtype, amp_dtype = torch.bfloat16, torch.bfloat16
+    else:
+        weight_dtype, amp_dtype = torch.float32, torch.bfloat16
+    cond_cfg = getattr(args, "conditioning", None)
+    use_token_set = bool(cond_cfg) and bool(cond_cfg.get("enabled", False))
     transform, gen_transform, slice_transform = build_transforms(weight_dtype, args)
     autoencoder, unet, noise_scheduler, loss_perceptual, scale_factor, global_mean = \
         load_models(args, device)
@@ -333,7 +353,7 @@ def run_generation(args, paths, device, local_rank, world_size):
                 if args.save_volume and not os.path.exists(vol_path):
                     nib.save(nib.Nifti1Image(base_images.cpu().numpy().squeeze().astype(np.float32), np.eye(4)), vol_path)
 
-                with torch.no_grad(), autocast(device_type="cuda", dtype=torch.float16, enabled=args.amp):
+                with torch.no_grad(), autocast(device_type="cuda", dtype=amp_dtype, enabled=args.amp):
                     z_mu, z_sigma = autoencoder.encode(base_images)
                     if args.deterministic_recon:
                         z = z_mu
@@ -381,16 +401,24 @@ def run_generation(args, paths, device, local_rank, world_size):
                 latent = noise
 
                 spacing_tensor = np.array(args.inference_spacing).astype(float) * 1e2
-                spacing_tensor = torch.from_numpy(spacing_tensor[np.newaxis, :]).half().to(device)
+                spacing_tensor = torch.from_numpy(spacing_tensor[np.newaxis, :]).to(device, dtype=weight_dtype)
 
-                meta_value = meta_values[i]
-                meta_tensor = torch.tensor([[meta_value]], device=device, dtype=torch.float16)
+                if use_token_set:
+                    from patches.token_set_encoder import encode_token_set
+                    ci, cv, pr = encode_token_set(meta_values[i], cond_cfg["attributes"])
+                    meta_tensor = {
+                        "cond_cat": torch.tensor([ci], dtype=torch.long, device=device),
+                        "cond_cont": torch.tensor([cv], dtype=torch.float32, device=device),
+                        "cond_presence": torch.tensor([pr], dtype=torch.bool, device=device),
+                    }
+                else:
+                    meta_tensor = torch.tensor([[meta_values[i]]], device=device, dtype=weight_dtype)
 
                 all_timesteps = noise_scheduler.timesteps
                 all_next_timesteps = torch.cat((all_timesteps[1:],
                                                 torch.tensor([0], dtype=all_timesteps.dtype)))
 
-                with torch.no_grad(), autocast(device_type="cuda", dtype=torch.float16, enabled=args.amp):
+                with torch.no_grad(), autocast(device_type="cuda", dtype=amp_dtype, enabled=args.amp):
                     for t, next_t in zip(all_timesteps, all_next_timesteps):
                         unet_inputs = {
                             "x": latent,

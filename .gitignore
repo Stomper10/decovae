@@ -47,3 +47,10 @@ Thumbs.db
 # SLURM job logs
 *.out
 slurm-*.out
+# preprocessing batch job logs (preproc_pipeline / preprocess_cache)
+logs_pp_*.log
+preproc_cache_*.log
+preproc_val*.log
+oom_sweep_*.log
+# QC montage artifacts (regenerate with scripts/montage_cache.py / dryrun_preproc.py)
+preproc_validation/

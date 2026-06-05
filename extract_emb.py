@@ -24,6 +24,7 @@ import logging
 import argparse
 import warnings
 import threading
+import contextlib
 import numpy as np
 import pandas as pd
 import nibabel as nib
@@ -136,7 +137,17 @@ def create_transforms(
     orientation_axcodes: str,
     intensity_norm: dict,
     dim: tuple | None = None,
+    cached: bool = False,
 ) -> Compose:
+    if cached:
+        # Already-preprocessed cache .npy (single-channel, final 192^3, [0,1]):
+        # load + add channel + fp32 only. No orient/resize/intensity (and NO
+        # round-to-128 resize) — encode at the native cache resolution.
+        return Compose([
+            monai.transforms.LoadImaged(keys="image"),
+            monai.transforms.EnsureChannelFirstd(keys="image", channel_dim="no_channel"),
+            monai.transforms.EnsureTyped(keys="image", dtype=torch.float32),
+        ])
     base = [
         monai.transforms.LoadImaged(keys="image"),
         monai.transforms.EnsureChannelFirstd(keys="image"),
@@ -164,7 +175,7 @@ def load_filenames(data_list_path: str, key: str) -> list:
 
 
 def process_file(filepath, ext_args, autoencoder, device, plain_transforms,
-                 new_transforms, logger, adapter):
+                 new_transforms, logger, adapter, cached=False):
     sid = adapter.extract_subject_id(filepath)
     out_filename = os.path.join(ext_args.embedding_base_dir, adapter.embedding_filename(sid))
     mu_filename = os.path.join(ext_args.embedding_base_dir, adapter.mu_filename(sid))
@@ -176,20 +187,28 @@ def process_file(filepath, ext_args, autoencoder, device, plain_transforms,
         return
 
     test_data = {"image": os.path.join(ext_args.data_base_dir, filepath)}
-    nda = plain_transforms(test_data)["image"]
-    dim = [int(nda.meta["dim"][i]) for i in range(1, 4)]
-    spacing = [float(nda.meta["pixdim"][i]) for i in range(1, 4)]
-    logger.info(f"old dim: {dim}, old spacing: {spacing}")
-
     new_data = new_transforms(test_data)
     nda_image = new_data["image"]
     new_affine = nda_image.meta["affine"].numpy()
+    if cached:
+        # cache .npy has no NIfTI header; it is final 192^3 @ 1mm.
+        dim = list(nda_image.shape[1:4])
+        spacing = [1.0, 1.0, 1.0]
+    else:
+        nda = plain_transforms(test_data)["image"]
+        dim = [int(nda.meta["dim"][i]) for i in range(1, 4)]
+        spacing = [float(nda.meta["pixdim"][i]) for i in range(1, 4)]
+    logger.info(f"dim: {dim}, spacing: {spacing}")
     nda_image = nda_image.numpy().squeeze()
-    logger.info(f"new dim: {nda_image.shape}, new affine: {new_affine}")
+    logger.info(f"encode dim: {nda_image.shape}")
 
     try:
         Path(out_filename).parent.mkdir(parents=True, exist_ok=True)
-        with torch.amp.autocast("cuda"):
+        # D1: cache/pooled latents extracted in fp32 (no autocast) — these are
+        # reused for all diffusion training + scale_factor. Raw datasets keep the
+        # original fp16 autocast path (MIUA reproducibility).
+        encode_ctx = contextlib.nullcontext() if cached else torch.amp.autocast("cuda")
+        with encode_ctx:
             pt_nda = torch.from_numpy(nda_image).float().to(device).unsqueeze(0).unsqueeze(0)
             z_mu, z_sigma = autoencoder.encode(pt_nda)
 
@@ -225,36 +244,43 @@ def _encode_all(ext_args, num_gpus, adapter):
         raise
 
     Path(ext_args.embedding_base_dir).mkdir(parents=True, exist_ok=True)
+    cached = bool(getattr(ext_args, "cached_input", False))
     plain_transforms = create_transforms(
         orientation_axcodes=ext_args.orientation_axcodes,
         intensity_norm=ext_args.intensity_norm,
         dim=None,
+        cached=cached,
     )
+    # For cached input there is no round-to-128 resize — encode at native 192^3.
+    cached_transforms = plain_transforms if cached else None
 
     for split, list_path, key in [
         ("training", ext_args.json_data_list, "training"),
         ("validation", ext_args.val_json_data_list, "validation"),
     ]:
         filenames = load_filenames(list_path, key)
-        logger.info(f"{split}: {len(filenames)} files")
+        logger.info(f"{split}: {len(filenames)} files (cached={cached})")
         for i, filepath in enumerate(filenames):
             if i % world_size != local_rank:
                 continue
-            new_dim = tuple(
-                round_number(
-                    int(plain_transforms(
-                        {"image": os.path.join(ext_args.data_base_dir, filepath)}
-                    )["image"].meta["dim"][j])
+            if cached:
+                new_transforms = cached_transforms
+            else:
+                new_dim = tuple(
+                    round_number(
+                        int(plain_transforms(
+                            {"image": os.path.join(ext_args.data_base_dir, filepath)}
+                        )["image"].meta["dim"][j])
+                    )
+                    for j in range(1, 4)
                 )
-                for j in range(1, 4)
-            )
-            new_transforms = create_transforms(
-                orientation_axcodes=ext_args.orientation_axcodes,
-                intensity_norm=ext_args.intensity_norm,
-                dim=new_dim,
-            )
+                new_transforms = create_transforms(
+                    orientation_axcodes=ext_args.orientation_axcodes,
+                    intensity_norm=ext_args.intensity_norm,
+                    dim=new_dim,
+                )
             process_file(filepath, ext_args, autoencoder, device,
-                         plain_transforms, new_transforms, logger, adapter)
+                         plain_transforms, new_transforms, logger, adapter, cached=cached)
 
 
 def _list_gz_files(folder_path: str) -> list[str]:
@@ -304,7 +330,10 @@ def run_extract(args: argparse.Namespace) -> int:
         if getattr(args, k) is None:
             raise ValueError(f"--{k} required for stage 'extract'")
 
-    adapter = get_adapter(args.dataset_adapter)
+    # Pooled diffusion targets exclude vae_only rows (BraTS-T1c): the VAE saw
+    # them, but the diffusion modality vocab is {T1,T2,FLAIR}, so no T1c latents.
+    adapter_kwargs = {"include_vae_only": False} if args.dataset_adapter == "pooled" else {}
+    adapter = get_adapter(args.dataset_adapter, **adapter_kwargs)
 
     out_dir = embeddings_dir(args.work_dir)
     Path(out_dir).mkdir(parents=True, exist_ok=True)
@@ -336,6 +365,7 @@ def run_extract(args: argparse.Namespace) -> int:
     # Thread dataset preprocessing into ext_args so create_transforms can read them.
     ext_args.orientation_axcodes = args.orientation_axcodes
     ext_args.intensity_norm = args.intensity_norm
+    ext_args.cached_input = bool(getattr(args, "cached_input", False))
 
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
@@ -395,7 +425,7 @@ def run_geometry(args: argparse.Namespace):
     print(f"[geometry] using {num_gpus} GPUs")
 
     adapter = get_adapter(args.dataset_adapter)
-    df = pd.read_csv(args.train_label_dir)
+    df = _norm_label_df(args.train_label_dir, adapter)
     target_ids = df[adapter.id_column].astype(str).tolist()
 
     train_emb_paths = []
@@ -543,7 +573,7 @@ def run_stat(args: argparse.Namespace):
     run_name = run_name_of(args.work_dir)
 
     adapter = get_adapter(args.dataset_adapter)
-    df = pd.read_csv(args.train_label_dir)
+    df = _norm_label_df(args.train_label_dir, adapter)
     target_ids = df[adapter.id_column].astype(str).tolist()
     print(f"[stat] {len(target_ids)} target ids; scanning {emb_dir} "
           f"with {args.num_stat_workers} workers")

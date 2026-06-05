@@ -363,7 +363,15 @@ def main():
     args = load_config()
     adapter = get_adapter(args.dataset_adapter)
     device = torch.device(f"cuda:{local_rank}")
-    weight_dtype = torch.float16 if args.weight_dtype == "fp16" else torch.float32
+    if args.weight_dtype == "fp16":
+        weight_dtype, amp_dtype = torch.float16, torch.float16
+    elif args.weight_dtype == "bf16":
+        weight_dtype, amp_dtype = torch.bfloat16, torch.bfloat16
+    else:
+        weight_dtype, amp_dtype = torch.float32, torch.float16
+    # bf16 autocast needs no gradient scaling; only fp16 does.
+    use_scaler = args.amp and amp_dtype == torch.float16
+    adv_warmup = int(getattr(args, "adv_warmup_steps", 0) or 0)
 
     # 활성화된 보조 loss 키만 따로 저장. 학습 루프 / logging에서 재사용한다.
     aux_active_keys = []
@@ -412,6 +420,7 @@ def main():
     train_files = adapter.load_manifest(args.train_label_dir, args.data_dir)
     val_files = adapter.load_manifest(args.valid_label_dir, args.data_dir, n=args.num_valid)
 
+    cached_input = getattr(args, "cached_input", False)
     train_transform = VAE_Transform(
         is_train=True, random_aug=args.random_aug, k=4,
         patch_size=args.patch_size, output_dtype=weight_dtype,
@@ -420,6 +429,7 @@ def main():
         intensity_norm=args.intensity_norm,
         orientation_axcodes=args.orientation_axcodes,
         select_channel=args.select_channel,
+        cached=cached_input,
     )
     val_transform = VAE_Transform(
         is_train=False, random_aug=False, k=4,
@@ -428,13 +438,25 @@ def main():
         intensity_norm=args.intensity_norm,
         orientation_axcodes=args.orientation_axcodes,
         select_channel=args.select_channel,
+        cached=cached_input,
     )
 
     if rank == 0: print(f"Total number of training data is {len(train_files)}.")
     workers_per_gpu = args.cpus_per_task // world_size
     train_dataset = CacheDataset(data=train_files, transform=train_transform,
                                  cache_rate=args.cache, num_workers=workers_per_gpu)
-    train_sampler = DistributedSampler(dataset=train_dataset, shuffle=True)
+    if getattr(args, "imbalance_sampling", False) and args.dataset_adapter == "pooled":
+        from datasets.sampling import DistributedWeightedSampler, temperature_weights
+        tau = float(getattr(args, "sampling_tau", 0.5))
+        cells = adapter.cell_labels(args.train_label_dir, "vae")  # cohort×modality
+        weights = temperature_weights(cells, tau)
+        train_sampler = DistributedWeightedSampler(weights, world_size, rank, seed=args.seed)
+        if rank == 0:
+            from collections import Counter
+            print(f"[Sampler] imbalance temperature τ={tau}, {len(set(cells))} VAE cells "
+                  f"(cohort×modality); cell sizes={dict(Counter(cells))}")
+    else:
+        train_sampler = DistributedSampler(dataset=train_dataset, shuffle=True)
     dataloader_train = DataLoader(
         train_dataset, batch_size=args.batch_size, num_workers=workers_per_gpu,
         sampler=train_sampler, pin_memory=True, drop_last=True,
@@ -480,7 +502,7 @@ def main():
     if rank == 0: print("total_opt_steps:", total_opt_steps)
     scheduler_g = lr_scheduler.CosineAnnealingLR(optimizer_g, T_max=total_opt_steps)
     scheduler_d = lr_scheduler.CosineAnnealingLR(optimizer_d, T_max=total_opt_steps)
-    scaler_g, scaler_d = (GradScaler(), GradScaler()) if args.amp else (None, None)
+    scaler_g, scaler_d = (GradScaler(), GradScaler()) if use_scaler else (None, None)
 
     start_step, best_val_loss, start_epoch = 0, float("inf"), 0
     if args.resume:
@@ -547,7 +569,7 @@ def main():
         batch = next(train_iter)
         images = batch["image"].to(device, non_blocking=True).contiguous()
 
-        with autocast(device_type="cuda", dtype=torch.float16, enabled=args.amp):
+        with autocast(device_type="cuda", dtype=amp_dtype, enabled=args.amp):
             reconstruction, z_mu, z_sigma = autoencoder(images)
 
         z_mu_f = z_mu.float()
@@ -565,7 +587,7 @@ def main():
             target_var=args.target_var,
         )
 
-        with autocast(device_type="cuda", dtype=torch.float16, enabled=args.amp):
+        with autocast(device_type="cuda", dtype=amp_dtype, enabled=args.amp):
             losses = {
                 "recons_loss": intensity_loss(reconstruction, images),
                 "kl_loss": kl_loss,
@@ -576,37 +598,44 @@ def main():
             logits_fake = discriminator(reconstruction.contiguous().float())[-1]
             generator_loss = adv_loss(logits_fake, target_is_real=True, for_discriminator=False)
 
+            # Adversarial warmup: AE learns reconstruction first; no adv gradient
+            # to the generator (and the discriminator is frozen) until adv_warmup
+            # steps. adv_warmup=0 (default / MIUA configs) → original behaviour.
+            adv_active = step >= adv_warmup
+            adv_w = args.adv_weight if adv_active else 0.0
             # Total = Recon + kl_w*KL + perc_w*P + adv_w*Adv + Σ λ_i * aux_i
             loss_g = (
                 losses["recons_loss"]
                 + args.kl_weight * losses["kl_loss"]
                 + args.perceptual_weight * losses["p_loss"]
-                + args.adv_weight * generator_loss
+                + adv_w * generator_loss
                 + aux_weighted_sum(aux_losses, args.lambda_cov, args.lambda_cor, args.lambda_var)
             )
             loss_g = loss_g / args.gradient_accumulation_steps
 
-        if args.amp:
+        if use_scaler:
             scaler_g.scale(loss_g).backward()
         else:
             loss_g.backward()
 
-        with autocast(device_type="cuda", dtype=torch.float16, enabled=args.amp):
-            logits_fake = discriminator(reconstruction.contiguous().detach())[-1]
-            loss_d_fake = adv_loss(logits_fake, target_is_real=False, for_discriminator=True)
-            logits_real = discriminator(images.contiguous().detach())[-1]
-            loss_d_real = adv_loss(logits_real, target_is_real=True, for_discriminator=True)
-            loss_d = (loss_d_fake + loss_d_real) * args.disc_weight
-            loss_d = loss_d / args.gradient_accumulation_steps
-
-        if args.amp:
-            scaler_d.scale(loss_d).backward()
+        if adv_active:
+            with autocast(device_type="cuda", dtype=amp_dtype, enabled=args.amp):
+                logits_fake = discriminator(reconstruction.contiguous().detach())[-1]
+                loss_d_fake = adv_loss(logits_fake, target_is_real=False, for_discriminator=True)
+                logits_real = discriminator(images.contiguous().detach())[-1]
+                loss_d_real = adv_loss(logits_real, target_is_real=True, for_discriminator=True)
+                loss_d = (loss_d_fake + loss_d_real) * args.disc_weight
+                loss_d = loss_d / args.gradient_accumulation_steps
+            if use_scaler:
+                scaler_d.scale(loss_d).backward()
+            else:
+                loss_d.backward()
         else:
-            loss_d.backward()
+            loss_d = loss_d_fake = loss_d_real = torch.zeros((), device=device)
 
         if (step + 1) % args.gradient_accumulation_steps == 0:
             # Generator
-            if args.amp:
+            if use_scaler:
                 scaler_g.unscale_(optimizer_g)
                 clip_grad_norm_(autoencoder.parameters(), 1.0)
                 scaler_g.step(optimizer_g)
@@ -617,17 +646,18 @@ def main():
             scheduler_g.step()
             optimizer_g.zero_grad(set_to_none=True)
 
-            # Discriminator
-            if args.amp:
-                scaler_d.unscale_(optimizer_d)
-                clip_grad_norm_(discriminator.parameters(), 1.0)
-                scaler_d.step(optimizer_d)
-                scaler_d.update()
-            else:
-                clip_grad_norm_(discriminator.parameters(), 1.0)
-                optimizer_d.step()
-            scheduler_d.step()
-            optimizer_d.zero_grad(set_to_none=True)
+            # Discriminator (frozen during adversarial warmup)
+            if adv_active:
+                if use_scaler:
+                    scaler_d.unscale_(optimizer_d)
+                    clip_grad_norm_(discriminator.parameters(), 1.0)
+                    scaler_d.step(optimizer_d)
+                    scaler_d.update()
+                else:
+                    clip_grad_norm_(discriminator.parameters(), 1.0)
+                    optimizer_d.step()
+                scheduler_d.step()
+                optimizer_d.zero_grad(set_to_none=True)
 
         # --------------------------------------------------------------
         # All-reduce per-step scalars for logging
@@ -681,7 +711,7 @@ def main():
             with torch.no_grad():
                 for val_batch in dataloader_val:
                     val_images = val_batch["image"].to(device)
-                    with autocast(device_type="cuda", dtype=torch.float16, enabled=args.amp):
+                    with autocast(device_type="cuda", dtype=amp_dtype, enabled=args.amp):
                         reconstruction, z_mu_val, z_sigma_val = dynamic_infer(val_inferer, autoencoder.module, val_images)
 
                     z_mu_val_f = z_mu_val.float()
@@ -805,7 +835,7 @@ def main():
                 "best_val_loss": float(best_val_loss),
                 "epoch": current_epoch,
             }
-            if args.amp:
+            if use_scaler:
                 state["scaler_g"] = scaler_g.state_dict()
                 state["scaler_d"] = scaler_d.state_dict()
             ckpt_dir = os.path.join(weights_vae_dir, f"checkpoint-{step}")

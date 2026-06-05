@@ -1,10 +1,16 @@
 # DecoVAE
 
-3D medical-image latent generative modeling with a VAE encoder/decoder, an
-optional decoder-side fine-tuning stage, and a rectified-flow diffusion UNet
-over the learned latents. The reference pipeline targets UK Biobank Field 20252
-T1 brain MRI but the dataset adapter layer makes it straightforward to plug in
-your own data.
+3D medical-image latent generative modeling with a VAE encoder/decoder whose
+**channel-wise latent decorrelation** objective (L_SID / L_VAD, toggled by the
+`LAMBDA_COV / LAMBDA_COR / LAMBDA_VAR` weights) yields a better-structured latent
+space for downstream diffusion, an optional decoder-side fine-tuning stage, and
+a rectified-flow diffusion UNet over the learned latents.
+
+The reference pipeline reproduces the MIUA 2026 paper (UK Biobank Field 20252,
+single-modality T1 brain MRI, unconditional). The dataset-adapter layer
+additionally supports a **pooled multi-cohort foundation-model** regime
+(`DATASET=pooled`) with **typed metadata token-set conditioning** of the
+diffusion UNet — see [Multi-cohort pooled model](#multi-cohort-pooled-foundation-model).
 
 ## Pipeline at a glance
 
@@ -32,18 +38,28 @@ not on a SLURM cluster.
 
 ```
 .
-├── configs/ukb_20252/        # public config templates (paths are null;
-│                             #   fill in via env.local.sh + launcher CLI args)
+├── configs/
+│   ├── ukb_20252/            # reference (MIUA) config templates (paths null)
+│   ├── ixi/  brats/          # additional per-cohort configs
+│   └── pooled/               # multi-cohort foundation-model config
+│                             #   (cached_input, conditioning token-set, bf16)
 ├── datasets/                 # pluggable dataset-adapter interface
+│   ├── base.py               # DatasetAdapter ABC
+│   ├── ukb_20252.py / ixi.py / brats.py
+│   ├── pooled.py             # pooled multi-cohort cache adapter
+│   └── sampling.py           # temperature-weighted distributed sampler
 ├── patches/                  # MONAI subclasses (Apache-2.0 derivative work)
-├── scripts/                  # transforms, utilities, DDP helpers
+│   ├── diffusion_model_unet_maisi_v2.py
+│   ├── rflow_scheduler_v2.py
+│   └── token_set_encoder.py  # typed metadata token-set conditioning encoder
+├── scripts/                  # transforms, utilities, preprocessing, DDP helpers
 │   ├── config_utils.py       # load_json() — JSON config loader
-│   ├── transforms.py
-│   ├── utils.py
+│   ├── transforms.py  utils.py
+│   ├── build_pooled_manifest.py / build_oasis_csv.py   # manifest builders
+│   ├── preproc_pipeline.py / preprocess_cache.py        # offline preprocessing cache
 │   └── …
 ├── train_VAE.py / train_DFT.py / train_UNET.py
-├── compute_metric.py
-├── extract_emb.py
+├── compute_metric.py / extract_emb.py
 ├── env.local.example.sh      # template — copy to env.local.sh and edit
 ├── environment.yml           # full conda env (frozen snapshot)
 └── requirements.txt          # curated pip-only dependencies
@@ -98,13 +114,13 @@ public JSON configs in `configs/ukb_20252/` never need to be edited.
 
 ## SLURM launchers
 
-The shipped launchers (`train_VAE.sh`, etc.) hard-code SLURM options for the
-reference cluster (`partition=P2`, specific `--exclude` list). For other
-clusters either:
+The shipped launchers (`train_VAE.sh`, etc.) hard-code `#SBATCH` options for the
+reference cluster (GPU partitions, `--gres=gpu:h100:N`, `--account=gpu`). For
+other clusters either:
 
 - Edit the `#SBATCH` block once for your cluster, or
 - Override at submission time:
-  `sbatch -p mypart --exclude=none train_VAE.sh`
+  `sbatch -p mypart --gres=gpu:1 train_VAE.sh`
 
 All experiment-level knobs (`EXP_NAME`, `OUTPUT_DIR_BASE`, `LAMBDA_*`, …) are
 exposed as `${VAR:=default}` defaults so you can override them via env vars at
@@ -153,8 +169,39 @@ subclass (see `datasets/base.py` for the surface and
 
 - `extract_subject_id(image_path) -> str`
 - `load_manifest(csv_path, data_dir) -> list[dict]`
-- `normalize_label_df(df) -> df` and `derive_conditions(row) -> list[float]`
+- `normalize_label_df(df) -> df` and `derive_conditions(row)` — returns a fixed
+  `list[float]` (per-cohort adapters) or a **typed token dict** (the pooled
+  adapter; absent keys map to `None` = token not emitted)
 - `meta_value_distribution(n, seed)` (optional; used by `compute_metric.py`)
+
+## Multi-cohort pooled foundation model
+
+Beyond the single-cohort reference pipeline, the repo supports training one
+**pooled** VAE + diffusion model across multiple brain-MRI cohorts and contrasts
+(T1 / T2 / FLAIR), selected with `DATASET=pooled`:
+
+1. **Manifest** — `scripts/build_pooled_manifest.py` harmonizes per-cohort label
+   CSVs into a single `pooled_manifest_{train,valid,test}.csv` (one row per
+   `subject × modality`, with typed metadata columns).
+2. **Offline preprocessing cache** — `scripts/preprocess_cache.py`
+   (`preprocess_cache.sh`) writes each volume as a preprocessed `.npy`
+   (skull-strip → N4 → rigid-to-MNI152 → 192³ → percentile-norm) plus a typed
+   conditioning-token sidecar JSON. `configs/pooled` sets `cached_input: true`
+   so training loads the cache directly (no re-preprocessing).
+3. **Training** — `DATASET=pooled sbatch train_VAE.sh` (then `train_DFT.sh`,
+   `extract_emb.sh`, `train_UNET.sh`). The VAE is unconditional; the diffusion
+   UNet is conditioned on a **typed metadata token set** (modality / sex / dx /
+   age / severity) via `patches/token_set_encoder.py` — present tokens only,
+   mean-pooled into the time-embedding, with classifier-free-guidance token
+   dropout. Configured under `configs/pooled/model_fm.json: conditioning`
+   (`enabled: false` → fully unconditional, i.e. the MIUA-reproduction path).
+   Imbalance is handled by a temperature-weighted sampler
+   (`datasets/sampling.py`), and training runs in bf16.
+4. **Per-cell evaluation** — `CELL=<cohort>_<modality> sbatch compute_metric.sh`
+   computes per-(cohort × modality) FID.
+
+The single-cohort MIUA configs (`configs/ukb_20252`) are unchanged, so the
+published result remains reproducible exactly as above.
 
 ## License & attribution
 
@@ -163,6 +210,15 @@ This project is released under the Apache License 2.0; see [`LICENSE`](LICENSE).
 The files under `patches/` (`diffusion_model_unet_maisi_v2.py`,
 `rflow_scheduler_v2.py`) are derivative works of the
 [MONAI](https://github.com/Project-MONAI/MONAI) project, also Apache-2.0.
+
+## Citation
+
+If you use this code, please cite our MIUA 2026 paper:
+
+> *Channel-wise Latent Space Decorrelation for 3D Brain MRI Generation.*
+> Medical Image Understanding and Analysis (MIUA), 2026.
+
+(BibTeX will be added once the proceedings entry is finalized.)
 
 ## Resuming from pre-refactor checkpoints
 

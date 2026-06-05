@@ -128,12 +128,20 @@ def define_vae_transform(
     label_keys: List[str] = [],
     additional_keys: List[str] = [],
     select_channel: int = 0,
+    cached: bool = False,
 ) -> Compose:
     """Compose the VAE preprocessing pipeline.
 
     All dataset-specific shape/orientation/intensity choices flow in via
     explicit args (``resolution``, ``orientation_axcodes``, ``intensity_norm``)
     so the function itself stays dataset-agnostic.
+
+    ``cached=True``: inputs are already-preprocessed cache volumes (``.npy``,
+    single-channel, final resolution, intensity already in [0, 1]). The whole
+    deterministic preprocessing block (load-orient-resize-channel-intensity-
+    spacing) is skipped — only load + add-channel runs — so the pooled cache
+    feeds the VAE without redundant (and lossy) re-preprocessing. Random
+    augmentation and patch cropping still apply when ``is_train``.
     """
     modality = modality.lower()
     if modality not in SUPPORT_MODALITIES:
@@ -148,23 +156,32 @@ def define_vae_transform(
     keys = image_keys + label_keys + additional_keys
     interp_mode = ["bilinear"] * len(image_keys) + ["nearest"] * len(label_keys)
 
-    common_transform = [
-        SelectItemsd(keys=keys, allow_missing_keys=True),
-        LoadImaged(keys=keys, allow_missing_keys=True),
-        EnsureChannelFirstd(keys=keys, allow_missing_keys=True),
-        Orientationd(keys=keys, axcodes=orientation_axcodes, allow_missing_keys=True),
-        Resized(keys=keys, spatial_size=tuple(resolution), size_mode="all", allow_missing_keys=True),
-    ]
+    if cached:
+        # Cache volumes are bare 3D arrays (no channel dim), already at final
+        # resolution / orientation / [0,1] intensity. Just load and add channel.
+        common_transform = [
+            SelectItemsd(keys=keys, allow_missing_keys=True),
+            LoadImaged(keys=keys, allow_missing_keys=True),
+            EnsureChannelFirstd(keys=keys, allow_missing_keys=True, channel_dim="no_channel"),
+        ]
+    else:
+        common_transform = [
+            SelectItemsd(keys=keys, allow_missing_keys=True),
+            LoadImaged(keys=keys, allow_missing_keys=True),
+            EnsureChannelFirstd(keys=keys, allow_missing_keys=True),
+            Orientationd(keys=keys, axcodes=orientation_axcodes, allow_missing_keys=True),
+            Resized(keys=keys, spatial_size=tuple(resolution), size_mode="all", allow_missing_keys=True),
+        ]
 
-    if modality == "mri":
-        common_transform.append(Lambdad(keys=image_keys, func=lambda x: x[select_channel : select_channel + 1, ...]))
+        if modality == "mri":
+            common_transform.append(Lambdad(keys=image_keys, func=lambda x: x[select_channel : select_channel + 1, ...]))
 
-    common_transform.extend(define_fixed_intensity_transform(intensity_norm, image_keys=image_keys))
+        common_transform.extend(define_fixed_intensity_transform(intensity_norm, image_keys=image_keys))
 
-    if spacing_type == "fixed":
-        common_transform.append(
-            Spacingd(keys=image_keys + label_keys, allow_missing_keys=True, pixdim=spacing, mode=interp_mode)
-        )
+        if spacing_type == "fixed":
+            common_transform.append(
+                Spacingd(keys=image_keys + label_keys, allow_missing_keys=True, pixdim=spacing, mode=interp_mode)
+            )
 
     random_transform = []
     if is_train and random_aug:
@@ -251,6 +268,7 @@ class VAE_Transform:
         label_keys: List[str] = [],
         additional_keys: List[str] = [],
         select_channel: int = 0,
+        cached: bool = False,
     ):
         if spacing_type not in ["original", "fixed", "rand_zoom"]:
             raise ValueError(
@@ -278,6 +296,7 @@ class VAE_Transform:
                 label_keys=label_keys,
                 additional_keys=additional_keys,
                 select_channel=select_channel,
+                cached=cached,
             )
 
     def __call__(self, img: dict, fixed_modality: Optional[str] = None) -> dict:
