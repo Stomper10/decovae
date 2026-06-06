@@ -55,6 +55,10 @@ source "${SCRIPT_DIR}/scripts/resolve_dataset.sh"
 : "${LAMBDA_VAR:=1.0}"
 : "${TARGET_VAR:=1.0}"
 : "${RESUME:=1}"   # 1 = pass --resume, 0 = fresh start
+# Stage2 (MAISI two-stage): init from a stage1 checkpoint (model weights only).
+# Set INIT_WEIGHTS to the stage1 weights/vae dir (or a model.pt). Ignored on
+# resume of stage2's own checkpoint. Empty = no init (stage1 / fresh).
+: "${INIT_WEIGHTS:=}"
 
 # ----------------------------------------------------------------------
 # Experiment directory tree + log
@@ -83,6 +87,10 @@ fi
 export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n1)
 export MASTER_PORT=$((10000 + RANDOM % 50000))
 export OMP_NUM_THREADS=1
+# Reduce allocator fragmentation. At stage1 128^3 bs4 the measured peak is
+# ~63GB of 80GB (OOM sweep), so the ~16GB headroom can be lost to fragmentation
+# without this. expandable_segments lets CUDA grow/shrink segments in place.
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 echo "UKB - Starting unified MAISI VAE MULTI-NODE DDP training..."
 echo "  job_name   : ${EXP_NAME}"
@@ -125,6 +133,10 @@ RESUME_FLAG=""
 if [[ "${RESUME}" == "1" ]]; then
     RESUME_FLAG="--resume"
 fi
+INIT_FLAG=""
+if [[ -n "${INIT_WEIGHTS}" ]]; then
+    INIT_FLAG="--init_weights_from ${INIT_WEIGHTS}"
+fi
 
 srun --cpu-bind=none,v --accel-bind=g torchrun \
     --nproc_per_node=${NPROC_PER_NODE} \
@@ -148,6 +160,7 @@ srun --cpu-bind=none,v --accel-bind=g torchrun \
       --lambda_cor "${LAMBDA_COR}" \
       --lambda_var "${LAMBDA_VAR}" \
       --target_var "${TARGET_VAR}" \
+      ${INIT_FLAG} \
       ${RESUME_FLAG} &
 wait
 exit 0

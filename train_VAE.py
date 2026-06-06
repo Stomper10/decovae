@@ -11,12 +11,14 @@ later migration to a config system (e.g. Hydra) trivial.
 import os
 import sys
 import json
+import time
 import yaml
 import wandb
 import signal
 import argparse
 import warnings
 import numpy as np
+from collections import defaultdict
 from tqdm import trange
 
 import torch
@@ -193,6 +195,11 @@ def load_config():
     parser.add_argument("--model_config_path", type=str, required=True)
     parser.add_argument("--train_config_path", type=str, required=True)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--init_weights_from", type=str, default=None,
+                        help="Stage2: init the autoencoder+discriminator from a stage1 "
+                             "checkpoint (model weights only; fresh optimizer/scheduler, "
+                             "start_step=0). Path to a model.pt or a weights/vae dir. "
+                             "Ignored when resuming this stage's own checkpoint.")
     parser.add_argument("--run_name", type=str, default=None)
     parser.add_argument("--cpus_per_task", type=int, default=8,
                         help="Number of CPUs allocated per task by Slurm.")
@@ -324,6 +331,32 @@ def resume_from_latest(autoencoder, discriminator,
     return ckpt.get("step", 0), ckpt.get("best_val_loss", float("inf")), ckpt.get("epoch", 0)
 
 
+def load_init_weights(autoencoder, discriminator, ckpt_path, device):
+    """Stage2 init from a stage1 checkpoint: load ONLY model weights (autoencoder
+    + discriminator); optimizer / scheduler / step start fresh. This is the MAISI
+    two-stage recipe — stage2 refines the stage1 autoencoder at a larger patch
+    under its own restarted LR schedule, so total training = stage1 + stage2 (NOT
+    a single run). ``ckpt_path`` may be a model.pt file or a weights dir holding
+    best-checkpoint/model.pt (preferred) or checkpoint-*/model.pt (latest)."""
+    p = ckpt_path
+    if os.path.isdir(p):
+        best = os.path.join(p, "best-checkpoint", "model.pt")
+        if os.path.exists(best):
+            p = best
+        else:
+            cks = [d for d in os.listdir(p) if d.startswith("checkpoint-")
+                   and os.path.exists(os.path.join(p, d, "model.pt"))]
+            if not cks:
+                raise FileNotFoundError(f"[init] no checkpoint found under {ckpt_path}")
+            latest = sorted(cks, key=lambda x: int(x.split("-")[1]))[-1]
+            p = os.path.join(p, latest, "model.pt")
+    ckpt = torch.load(p, map_location=device)
+    autoencoder.load_state_dict(ckpt["autoencoder"])
+    discriminator.load_state_dict(ckpt["discriminator"])
+    print(f"[init] loaded stage1 model weights from {p} "
+          f"(fresh optimizer/scheduler, start_step=0)", flush=True)
+
+
 def prepare_image_for_logging(image_tensor, center_loc):
     image_tensor_cpu = image_tensor.cpu()
     vis_img_np = get_xyz_plot(image_tensor_cpu, center_loc, mask_bool=False)
@@ -418,7 +451,17 @@ def main():
     # Data
     # ------------------------------------------------------------------
     train_files = adapter.load_manifest(args.train_label_dir, args.data_dir)
-    val_files = adapter.load_manifest(args.valid_label_dir, args.data_dir, n=args.num_valid)
+    # Pooled valid CSV is cohort-ordered (UKB-dominated); use balanced
+    # cell-stratified selection so the in-loop recon monitor sees every cohort.
+    if getattr(args, "dataset_adapter", None) == "pooled" and hasattr(adapter, "load_manifest_stratified"):
+        val_files = adapter.load_manifest_stratified(
+            args.valid_label_dir, args.data_dir, n=args.num_valid, stage="vae", seed=args.seed)
+    else:
+        val_files = adapter.load_manifest(args.valid_label_dir, args.data_dir, n=args.num_valid)
+    # Per-cohort val recon (pooled): cell label aligned to val_files order. None
+    # for adapters that don't tag cells → per-cell logging is skipped.
+    val_cells = [f.get("cell") for f in val_files]
+    canonical_cells = sorted({c for c in val_cells if c is not None})
 
     cached_input = getattr(args, "cached_input", False)
     train_transform = VAE_Transform(
@@ -470,6 +513,7 @@ def main():
     start = rank * per_rank
     end = min(val_total, start + per_rank)
     val_files_shard = val_files[start:end]
+    val_cells_shard = val_cells[start:end]
     dataset_val = CacheDataset(data=val_files_shard, transform=val_transform,
                                cache_rate=0.0, num_workers=workers_per_gpu)
     dataloader_val = DataLoader(
@@ -505,10 +549,17 @@ def main():
     scaler_g, scaler_d = (GradScaler(), GradScaler()) if use_scaler else (None, None)
 
     start_step, best_val_loss, start_epoch = 0, float("inf"), 0
+    resumed = False
     if args.resume:
         start_step, best_val_loss, start_epoch = resume_from_latest(
             autoencoder, discriminator, optimizer_g, optimizer_d,
             scheduler_g, scheduler_d, scaler_g, scaler_d, weights_vae_dir, device)
+        resumed = start_step > 0
+    # stage2: if this stage has no checkpoint of its own yet, initialise from the
+    # stage1 weights. On requeue (own checkpoint present) resume wins and init is
+    # skipped, so we never clobber stage2 progress.
+    if not resumed and getattr(args, "init_weights_from", None):
+        load_init_weights(autoencoder, discriminator, args.init_weights_from, device)
     dist.barrier(device_ids=[local_rank])
 
     if rank == 0: print("Compiling models with torch.compile()...")
@@ -560,6 +611,12 @@ def main():
         overlap=0.5, device=device, sw_device=device,
     )
 
+    # Running stats for periodic logging (grad norms, throughput). Initialised so
+    # the first logging step (before any optimizer step / during warmup) is valid.
+    gnorm_g = torch.zeros((), device=device)
+    gnorm_d = torch.zeros((), device=device)
+    t_window = time.time()
+
     # ==================================================================
     # Training loop
     # ==================================================================
@@ -574,8 +631,6 @@ def main():
 
         z_mu_f = z_mu.float()
         z_sigma_f = torch.clamp(z_sigma.float(), min=1e-8)
-        avg_z_mu_mean = z_mu_f.mean().item()
-        avg_z_sigma_mean = z_sigma_f.mean().item()
         logvar = 2.0 * torch.log(z_sigma_f)
         logvar = torch.clamp(logvar, min=-30.0, max=10.0)
         kl = 0.5 * (torch.exp(logvar) + z_mu_f ** 2 - 1.0 - logvar)
@@ -587,6 +642,7 @@ def main():
             target_var=args.target_var,
         )
 
+        adv_active = step >= adv_warmup
         with autocast(device_type="cuda", dtype=amp_dtype, enabled=args.amp):
             losses = {
                 "recons_loss": intensity_loss(reconstruction, images),
@@ -595,13 +651,16 @@ def main():
             }
             losses.update(aux_losses)
 
-            logits_fake = discriminator(reconstruction.contiguous().float())[-1]
-            generator_loss = adv_loss(logits_fake, target_is_real=True, for_discriminator=False)
-
             # Adversarial warmup: AE learns reconstruction first; no adv gradient
             # to the generator (and the discriminator is frozen) until adv_warmup
-            # steps. adv_warmup=0 (default / MIUA configs) → original behaviour.
-            adv_active = step >= adv_warmup
+            # steps. Skip the generator's discriminator forward during warmup —
+            # it contributes 0 (adv_w=0) but would otherwise cost a full disc
+            # forward + graph every warmup step. adv_warmup=0 (MIUA) → original.
+            if adv_active:
+                logits_fake = discriminator(reconstruction.contiguous().float())[-1]
+                generator_loss = adv_loss(logits_fake, target_is_real=True, for_discriminator=False)
+            else:
+                generator_loss = torch.zeros((), device=device)
             adv_w = args.adv_weight if adv_active else 0.0
             # Total = Recon + kl_w*KL + perc_w*P + adv_w*Adv + Σ λ_i * aux_i
             loss_g = (
@@ -637,11 +696,11 @@ def main():
             # Generator
             if use_scaler:
                 scaler_g.unscale_(optimizer_g)
-                clip_grad_norm_(autoencoder.parameters(), 1.0)
+                gnorm_g = clip_grad_norm_(autoencoder.parameters(), 1.0)
                 scaler_g.step(optimizer_g)
                 scaler_g.update()
             else:
-                clip_grad_norm_(autoencoder.parameters(), 1.0)
+                gnorm_g = clip_grad_norm_(autoencoder.parameters(), 1.0)
                 optimizer_g.step()
             scheduler_g.step()
             optimizer_g.zero_grad(set_to_none=True)
@@ -650,50 +709,78 @@ def main():
             if adv_active:
                 if use_scaler:
                     scaler_d.unscale_(optimizer_d)
-                    clip_grad_norm_(discriminator.parameters(), 1.0)
+                    gnorm_d = clip_grad_norm_(discriminator.parameters(), 1.0)
                     scaler_d.step(optimizer_d)
                     scaler_d.update()
                 else:
-                    clip_grad_norm_(discriminator.parameters(), 1.0)
+                    gnorm_d = clip_grad_norm_(discriminator.parameters(), 1.0)
                     optimizer_d.step()
                 scheduler_d.step()
                 optimizer_d.zero_grad(set_to_none=True)
 
         # --------------------------------------------------------------
-        # All-reduce per-step scalars for logging
+        # Logging. Each reduce_mean_scalar is an all_reduce (collective) + a
+        # .item() (CPU-GPU sync); doing ~8 of them every step serializes the
+        # pipeline. Gate the whole block on the logging cadence so non-logging
+        # steps incur zero collective/sync overhead. The progress-bar loss
+        # postfix updates with the same cadence. (reduce_* must be called by ALL
+        # ranks — keep them outside the rank-0 guard.)
         # --------------------------------------------------------------
-        gas = args.gradient_accumulation_steps
-        lg = reduce_mean_scalar(loss_g) * gas
-        ld = reduce_mean_scalar(loss_d) * gas
-        avg_recons_loss = reduce_mean_scalar(losses["recons_loss"]) * gas
-        avg_kl_loss = reduce_mean_scalar(losses["kl_loss"]) * gas
-        avg_p_loss = reduce_mean_scalar(losses["p_loss"]) * gas
-        avg_gen_loss = reduce_mean_scalar(generator_loss) * gas
-        avg_dfake_loss = reduce_mean_scalar(loss_d_fake) * gas
-        avg_dreal_loss = reduce_mean_scalar(loss_d_real) * gas
-        # 활성화된 보조 loss만 reduce -> 비활성 항목에 대한 통신 / 로깅 비용 0
-        avg_aux = {k: reduce_mean_scalar(v) * gas for k, v in aux_losses.items()}
+        if step % 100 == 0:
+            gas = args.gradient_accumulation_steps
+            lg = reduce_mean_scalar(loss_g) * gas
+            ld = reduce_mean_scalar(loss_d) * gas
+            avg_recons_loss = reduce_mean_scalar(losses["recons_loss"]) * gas
+            avg_kl_loss = reduce_mean_scalar(losses["kl_loss"]) * gas
+            avg_p_loss = reduce_mean_scalar(losses["p_loss"]) * gas
+            avg_gen_loss = reduce_mean_scalar(generator_loss) * gas
+            avg_dfake_loss = reduce_mean_scalar(loss_d_fake) * gas
+            avg_dreal_loss = reduce_mean_scalar(loss_d_real) * gas
+            # 활성화된 보조 loss만 reduce -> 비활성 항목에 대한 통신 / 로깅 비용 0
+            avg_aux = {k: reduce_mean_scalar(v) * gas for k, v in aux_losses.items()}
+            # Monitors (all ranks must call reduce): latent channel decorrelation
+            # (the L_cor objective, logged even when lambda_cor=0 to compare the
+            # baseline against L_SID/L_VAD) + pre-clip grad norms (divergence watch).
+            corr_mon = reduce_mean_scalar(
+                compute_correlation_loss(_flatten_latent(z_mu.detach().float())))
+            gnorm_g_r = reduce_mean_scalar(gnorm_g)
+            gnorm_d_r = reduce_mean_scalar(gnorm_d)
 
-        if rank == 0:
-            progress_bar.set_postfix({'Total_g_loss': f"{lg:.4f}", 'Total_d_loss': f"{ld:.4f}"})
-            if args.report_to and step % 100 == 0:
-                log_data = {
-                    "train/learning_rate": scheduler_g.get_last_lr()[0],
-                    "train/loss_g_total": lg,
-                    "train/loss_d_total": ld,
-                    "train/z_mu_mean": avg_z_mu_mean,
-                    "train/z_sigma_mean": avg_z_sigma_mean,
-                    "train/generator/recons_loss": avg_recons_loss,
-                    "train/generator/kl_loss": avg_kl_loss,
-                    "train/generator/p_loss": avg_p_loss,
-                    "train/discriminator/adv_g_loss": avg_gen_loss,
-                    "train/discriminator/d_fake_loss": avg_dfake_loss,
-                    "train/discriminator/d_real_loss": avg_dreal_loss,
-                }
-                # Dynamic logging: 활성화된 보조 loss만 추가.
-                for k, v in avg_aux.items():
-                    log_data[f"train/generator/{k}"] = v
-                wandb.log(log_data, step=step)
+            if rank == 0:
+                progress_bar.set_postfix({'Total_g_loss': f"{lg:.4f}", 'Total_d_loss': f"{ld:.4f}"})
+                if args.report_to:
+                    log_data = {
+                        "train/learning_rate": scheduler_g.get_last_lr()[0],
+                        "train/loss_g_total": lg,
+                        "train/loss_d_total": ld,
+                        "train/z_mu_mean": z_mu_f.mean().item(),
+                        "train/z_sigma_mean": z_sigma_f.mean().item(),
+                        "train/generator/recons_loss": avg_recons_loss,
+                        "train/generator/kl_loss": avg_kl_loss,
+                        "train/generator/p_loss": avg_p_loss,
+                        "train/discriminator/adv_g_loss": avg_gen_loss,
+                        "train/discriminator/d_fake_loss": avg_dfake_loss,
+                        "train/discriminator/d_real_loss": avg_dreal_loss,
+                        "train/latent/offdiag_corr": corr_mon,
+                        "train/grad_norm/generator": gnorm_g_r,
+                        "train/grad_norm/discriminator": gnorm_d_r,
+                    }
+                    # Dynamic logging: 활성화된 보조 loss만 추가.
+                    for k, v in avg_aux.items():
+                        log_data[f"train/generator/{k}"] = v
+                    # Throughput / memory (for tuning + cross-method compute budget
+                    # accounting, e.g. vs 3D MedDiffusion). Windowed over the 100-step
+                    # logging interval; total GPU-hours come from `sacct` (handles requeue).
+                    now = time.time()
+                    dt = now - t_window
+                    t_window = now
+                    if dt > 0:
+                        itps = 100.0 / dt
+                        log_data["perf/it_per_s"] = itps
+                        log_data["perf/samples_per_s"] = itps * args.batch_size * world_size
+                    log_data["perf/peak_mem_gb"] = torch.cuda.max_memory_allocated(device) / 1e9
+                    torch.cuda.reset_peak_memory_stats(device)
+                    wandb.log(log_data, step=step)
 
         # ==============================================================
         # Validation
@@ -707,9 +794,11 @@ def main():
             for k in aux_active_keys:
                 val_epoch_losses[k] = 0.0
             num_val_batches_local = 0
+            cell_recon_sum = defaultdict(float)   # per-cohort recon (val_batch_size=1)
+            cell_recon_cnt = defaultdict(int)
 
             with torch.no_grad():
-                for val_batch in dataloader_val:
+                for vi, val_batch in enumerate(dataloader_val):
                     val_images = val_batch["image"].to(device)
                     with autocast(device_type="cuda", dtype=amp_dtype, enabled=args.amp):
                         reconstruction, z_mu_val, z_sigma_val = dynamic_infer(val_inferer, autoencoder.module, val_images)
@@ -728,7 +817,12 @@ def main():
 
                     reconstruction = reconstruction.to(device)
                     val_images = val_images.to(device)
-                    val_epoch_losses["recons_loss"] += intensity_loss(reconstruction, val_images).item()
+                    recon_l = intensity_loss(reconstruction, val_images).item()
+                    cell = val_cells_shard[vi] if vi < len(val_cells_shard) else None
+                    if cell is not None:
+                        cell_recon_sum[cell] += recon_l
+                        cell_recon_cnt[cell] += 1
+                    val_epoch_losses["recons_loss"] += recon_l
                     val_epoch_losses["kl_loss"] += kl_loss_val
                     val_epoch_losses["p_loss"] += loss_perceptual(reconstruction.float(), val_images.float()).item()
                     val_epoch_losses["z_mu_mean"] += z_mu_val_f.mean().item()
@@ -753,6 +847,23 @@ def main():
             avg_z_mu_mean_v = reduced["z_mu_mean"]
             avg_z_sigma_mean_v = reduced["z_sigma_mean"]
 
+            # Per-cohort recon: pack (sum, count) per canonical cell, all-reduce,
+            # then average. canonical_cells is identical on every rank.
+            per_cell_recon = {}
+            if canonical_cells:
+                cidx = {c: i for i, c in enumerate(canonical_cells)}
+                nC = len(canonical_cells)
+                cell_t = torch.zeros(2 * nC, device=device, dtype=torch.float32)
+                for c, s in cell_recon_sum.items():
+                    cell_t[cidx[c]] = s
+                for c, n in cell_recon_cnt.items():
+                    cell_t[nC + cidx[c]] = n
+                dist.all_reduce(cell_t, op=dist.ReduceOp.SUM)
+                for c, i in cidx.items():
+                    n = cell_t[nC + i].item()
+                    if n > 0:
+                        per_cell_recon[c] = cell_t[i].item() / n
+
             val_loss_g = (
                 avg_recon_loss
                 + args.kl_weight * avg_kl_loss_v
@@ -776,6 +887,8 @@ def main():
                     }
                     for k in aux_active_keys:
                         log_data[f"valid/{k}"] = reduced[k]
+                    for c, v in per_cell_recon.items():
+                        log_data[f"valid/recon_by_cell/{c}"] = v
                     if num_val_batches_local > 0:
                         std = z_mu_val.detach().float().flatten().std().clamp(min=1e-8)
                         log_data["valid/scale_factor"] = (1.0 / std).item()

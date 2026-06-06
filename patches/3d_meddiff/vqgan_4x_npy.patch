@@ -1,0 +1,47 @@
+--- a/dataset/vqgan_4x.py
++++ b/dataset/vqgan_4x.py
+@@ -1,5 +1,6 @@
+ 
+ import torch
++import numpy as np
+ from torch.utils.data.dataset import Dataset
+ import os
+ import random
+@@ -27,7 +28,7 @@
+                 entries = dataroots[split]
+                 entries = entries if isinstance(entries, list) else [entries]
+                 for entry in entries:
+-                    if entry.endswith('.nii.gz'):
++                    if entry.endswith(('.nii.gz', '.npy')):
+                         self.file_names.append(entry)
+                     else:
+                         self.file_names += glob.glob(os.path.join(entry, './*.nii.gz'), recursive=True)
+@@ -35,7 +36,7 @@
+                 for key,value in dataroots.items():
+                     if type(value) == list:
+                         for path in value:
+-                            if path.endswith('.nii.gz'):
++                            if path.endswith(('.nii.gz', '.npy')):
+                                 self.file_names.append(path)
+                             else:
+                                 self.file_names += (glob.glob(os.path.join(path, './*.nii.gz'), recursive=True))
+@@ -72,8 +73,17 @@
+ 
+     def __getitem__(self, index):
+         path = self.file_names[index]
+-        whole_img = tio.ScalarImage(path)
+-        whole_img = self.intensity_rescale(whole_img)
++        # DecoVAE patch: the pooled corpus feeds the preprocessed .npy cache
++        # (fp16 192^3, already percentile-normalized to [0,1] — the SAME input
++        # the MAISI / DeCo-VAE runs consume, for apples-to-apples data). Load
++        # it straight to a tensor and SKIP intensity_rescale (already [0,1]);
++        # the `* 2 - 1` below still maps it to 3D-MedDiff's native [-1, 1].
++        if path.endswith('.npy'):
++            arr = np.squeeze(np.load(path)).astype('float32')
++            whole_img = tio.ScalarImage(tensor=torch.from_numpy(arr)[None])
++        else:
++            whole_img = tio.ScalarImage(path)
++            whole_img = self.intensity_rescale(whole_img)
+         if self.stage == 1 and self.split == 'train':
+             img = None
+             while img== None or img.data.sum() ==0:

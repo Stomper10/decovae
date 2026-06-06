@@ -1,0 +1,72 @@
+# 3D-MedDiffusion PatchVolume AE — POOLED multi-cohort baseline for the DecoVAE
+# journal extension (foundation-model comparison vs MAISI / L_SID / L_VAD).
+#
+# Run from repo root with the 3d_meddiff conda env:
+#   conda activate 3d_meddiff
+#   python external/3d_meddiff/train/train_PatchVolume.py \
+#     --config configs/3d_meddiff/PatchVolume_4x_pooled.yaml
+#
+# DATA EQUALIZATION (apples-to-apples): root_dir points at data_pooled.json,
+# whose paths are the SAME preprocessed .npy cache the MAISI/DeCo-VAE runs
+# consume (fp16 192^3, percentile-0-99.5 -> [0,1], unified skull-strip/N4/MNI).
+# The patched VQGANDataset_4x loads .npy directly and skips its own
+# tio.RescaleIntensity (already [0,1]); the `* 2 - 1` still gives 3D-MedDiff
+# its native [-1,1] range. So ONLY the model recipe differs, not the data.
+# (see patches/3d_meddiff/vqgan_4x_npy.patch)
+#
+# COMPUTE / FAIRNESS = (B) converged-best (2026-06-06 decision): 3DMD is trained
+# to its OWN convergence plateau with a GPU-hour floor >= MAISI total, and we
+# report GPU-hours + convergence curves for BOTH the equal-budget point and the
+# plateau (so the comparison answers "equal budget" AND "best-vs-best", blocking
+# any undertrained-baseline criticism). max_steps is the upstream PUBLISHED
+# ceiling (1,000,000), NOT a compute-match constant: 3DMD uses constant Adam
+# 3e-4 with NO LR schedule, so a high cap does not distort training — the
+# operative stop is the rFID plateau (post-hoc full-valid). The affordable
+# ceiling is finalized after the stage1 throughput sanity (measured it/s ->
+# GPU-hours) and MAISI's measured GPU-hours. Step count is NOT matched to MAISI
+# (64^3xbs16 steps != 128^3xbs4 steps); GPU-hours is the only fair anchor.
+# This is 3DMD's stage1 (patch phase); the full recipe adds stage2 (volume) via
+# PatchVolume_4x_pooled_s2.yaml.
+#
+# Everything under `model:` except the paths is 3D-MedDiff's OWN recipe
+# (VQ-GAN, 64^3 patch, [-1,1], disc warmup, lr 3e-4) — kept unchanged so the
+# baseline is the method's real recipe, not a MAISI-hyperparam strawman.
+
+model:
+  seed: 1234
+  batch_size: 16
+  num_workers: 8
+
+  gpus: 8
+  default_root_dir: /data/wonyoungjang/decodata/3d_meddiff/pooled
+  resume_from_checkpoint:
+  max_steps: 1000000
+  max_epochs: 10000
+  precision: bf16
+
+  perceptual_3d: False
+  embedding_dim: 8
+  n_codes: 8192
+  n_hiddens: 48
+  lr: 3e-4
+  downsample: [4, 4, 4]
+  disc_channels: 32
+  disc_layers: 3
+  discriminator_iter_start: 12000
+  disc_loss_type: hinge
+  volume_gan_weight: 2
+  l1_weight: 4.0
+  gan_feat_weight: 4
+  perceptual_weight: 2
+  i3d_feat: False
+  restart_thres: 1.0
+  no_random_restart: False
+  norm_type: group
+  num_groups: 24
+  stage: 1
+
+dataset:
+  root_dir: /data/wonyoungjang/decovae/configs/3d_meddiff/data_pooled.json
+  image_channels: 1
+  imgtype: MR
+  patch_size: 64

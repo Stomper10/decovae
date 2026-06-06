@@ -100,6 +100,44 @@ class PooledAdapter(DatasetAdapter):
             for key in df["cache_key"]
         ]
 
+    def load_manifest_stratified(self, csv_path: str, data_dir: str,
+                                 n: int, stage: str = "vae",
+                                 seed: int = 0) -> list[dict]:
+        """Balanced cell-stratified manifest of (about) ``n`` rows.
+
+        The pooled valid CSV is cohort-ordered and UKB-dominated (≈76%), so a
+        plain first-``n`` slice (``load_manifest(n=...)``) yields an all-UKB
+        in-loop validation set. This instead round-robins across sampling cells
+        (``cell_of(row, stage)``) after a deterministic per-cell shuffle, so
+        every cell — including small cohorts (ixi / oasis) — is represented
+        roughly equally (``n // num_cells`` each, remainder to the first cells).
+        Used only for the recon-monitoring val loop; final FID / checkpoint
+        selection runs over the full valid split in ``compute_metric``.
+        """
+        df = self._read(csv_path, None)
+        cells = {}
+        for pos, (_, row) in enumerate(df.iterrows()):
+            cells.setdefault(self.cell_of(row, stage), []).append(pos)
+        rng = np.random.default_rng(seed)
+        for c in cells:
+            rng.shuffle(cells[c])
+        order = sorted(cells)  # deterministic cell order
+        picked: list[int] = []
+        i = 0
+        while len(picked) < n and any(cells[c] for c in order):
+            c = order[i % len(order)]
+            if cells[c]:
+                picked.append(cells[c].pop())
+            i += 1
+        sub = df.iloc[sorted(picked)]
+        # "cell" rides along for per-cohort val logging; the VAE transform's
+        # SelectItemsd(keys=["image"]) drops it before tensors are built.
+        return [
+            {"image": os.path.join(data_dir, f"{r.cache_key}.npy"),
+             "class": self.modality, "cell": self.cell_of(r, stage)}
+            for _, r in sub.iterrows()
+        ]
+
     # -- imbalance sampling (§4.3) -------------------------------------------
     @staticmethod
     def cell_of(row, stage: str) -> str:
