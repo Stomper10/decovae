@@ -96,7 +96,7 @@ def visualize_one_slice_in_3d(image, axis: int = 2, center=None, mask_bool=True,
     if mask_bool:
         draw_img = normalize_label_to_uint8(colorize, draw_img, n_label)
     else:
-        draw_img = draw_img.squeeze().cpu().numpy().astype(np.float32)
+        draw_img = draw_img.squeeze().float().cpu().numpy().astype(np.float32)
         draw_img = np.stack((draw_img,) * 3, axis=-1)
     return draw_img
 

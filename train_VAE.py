@@ -358,7 +358,9 @@ def load_init_weights(autoencoder, discriminator, ckpt_path, device):
 
 
 def prepare_image_for_logging(image_tensor, center_loc):
-    image_tensor_cpu = image_tensor.cpu()
+    # .float() before any numpy path: bf16 weight_dtype produces bf16 tensors and
+    # numpy has no bfloat16 dtype (fp16 is fine, so the MIUA path never hit this).
+    image_tensor_cpu = image_tensor.detach().float().cpu()
     vis_img_np = get_xyz_plot(image_tensor_cpu, center_loc, mask_bool=False)
     min_val, max_val = vis_img_np.min(), vis_img_np.max()
     if max_val - min_val > 1e-6:
@@ -914,7 +916,7 @@ def main():
                         "best_val_loss": best_val_loss,
                         "epoch": current_epoch,
                     }
-                    if args.amp:
+                    if use_scaler:
                         state["scaler_g"] = scaler_g.state_dict()
                         state["scaler_d"] = scaler_d.state_dict()
                     best_dir = os.path.join(weights_vae_dir, "best-checkpoint")
