@@ -781,6 +781,9 @@ def main():
                         log_data["perf/it_per_s"] = itps
                         log_data["perf/samples_per_s"] = itps * args.batch_size * world_size
                     log_data["perf/peak_mem_gb"] = torch.cuda.max_memory_allocated(device) / 1e9
+                    # Reserved peak reflects the caching-allocator footprint (what actually
+                    # drives OOM); allocated peak undercounts it. Log both for headroom sizing.
+                    log_data["perf/peak_mem_reserved_gb"] = torch.cuda.max_memory_reserved(device) / 1e9
                     torch.cuda.reset_peak_memory_stats(device)
                     wandb.log(log_data, step=step)
 
