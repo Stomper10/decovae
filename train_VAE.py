@@ -564,9 +564,21 @@ def main():
         load_init_weights(autoencoder, discriminator, args.init_weights_from, device)
     dist.barrier(device_ids=[local_rank])
 
-    if rank == 0: print("Compiling models with torch.compile()...")
-    autoencoder = torch.compile(autoencoder)
-    discriminator = torch.compile(discriminator)
+    # compile_mode (config-gated): None = default inductor fusion (pooled default).
+    # The real throughput fix was disabling the MAISI autoencoder's in-forward
+    # torch.cuda.empty_cache (model_fm.json save_mem=false / num_splits=1), NOT
+    # compile mode. "reduce-overhead" (CUDA graphs) is available but UNSAFE here:
+    # compiling BOTH autoencoder and discriminator means that once adversarial
+    # training turns on (adv_warmup_steps), the AE's graphed reconstruction is
+    # consumed by the disc's own cudagraph, whose replay overwrites the static
+    # output buffer -> "accessing tensor output of CUDAGraphs that has been
+    # overwritten" crash at the adv-on step. Keep None unless you add
+    # cudagraph_mark_step_begin()/.clone() around each model invocation.
+    compile_mode = getattr(args, "compile_mode", None) or None
+    compile_kwargs = {"mode": compile_mode} if compile_mode else {}
+    if rank == 0: print(f"Compiling models with torch.compile(mode={compile_mode})...")
+    autoencoder = torch.compile(autoencoder, **compile_kwargs)
+    discriminator = torch.compile(discriminator, **compile_kwargs)
     dist.barrier(device_ids=[local_rank])
     autoencoder = DDP(autoencoder, device_ids=[local_rank], find_unused_parameters=False)
     discriminator = DDP(discriminator, device_ids=[local_rank], find_unused_parameters=False)

@@ -47,8 +47,9 @@
         "use_checkpointing": true,
         "use_convtranspose": false,
         "norm_float16": true,
-        "num_splits": 4,
-        "dim_split": 1
+        "num_splits": 1,
+        "dim_split": 1,
+        "save_mem": false
     },
     "diffusion_unet_def": {
         "_target_": "patches.diffusion_model_unet_maisi_v2.DiffusionModelUNetMaisiV2",

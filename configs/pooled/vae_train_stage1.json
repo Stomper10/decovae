@@ -40,6 +40,7 @@
         "early_stop_min_delta": 0.01,
         "gradient_accumulation_steps": 1,
         "pretrained_steps": 0,
-        "adv_warmup_steps": 4000
+        "adv_warmup_steps": 4000,
+        "compile_mode": null
     }
 }
