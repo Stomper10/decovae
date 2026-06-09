@@ -324,7 +324,7 @@ def run_generation(args, paths, device, local_rank, world_size):
                 skip = os.path.exists(slice_path) and (not args.save_volume or os.path.exists(vol_path))
                 if not skip:
                     base_data = transform(base_files[i])
-                    base_images = base_data["image"].unsqueeze(0).to(device)
+                    base_images = base_data["image"].unsqueeze(0).to(device, dtype=weight_dtype)
                     save_wandb_style_xyz_plot(slice_transform(base_images.cpu()[0]), f"{i:04d}_base", slice_dir)
                     if args.save_volume:
                         nib.save(nib.Nifti1Image(base_images.cpu().numpy().squeeze().astype(np.float32), np.eye(4)), vol_path)
@@ -335,7 +335,7 @@ def run_generation(args, paths, device, local_rank, world_size):
                 skip = os.path.exists(slice_path) and (not args.save_volume or os.path.exists(vol_path))
                 if not skip:
                     other_data = transform(other_files[i])
-                    other_images = other_data["image"].unsqueeze(0).to(device)
+                    other_images = other_data["image"].unsqueeze(0).to(device, dtype=weight_dtype)
                     save_wandb_style_xyz_plot(slice_transform(other_images.cpu()[0]), f"{i:04d}_other", slice_dir)
                     if args.save_volume:
                         nib.save(nib.Nifti1Image(other_images.cpu().numpy().squeeze().astype(np.float32), np.eye(4)), vol_path)
@@ -344,7 +344,7 @@ def run_generation(args, paths, device, local_rank, world_size):
         elif args.eval_mode == "real_vs_recon":
             if base_files and i < len(base_files):
                 base_data = transform(base_files[i])
-                base_images = base_data["image"].unsqueeze(0).to(device)
+                base_images = base_data["image"].unsqueeze(0).to(device, dtype=weight_dtype)
 
                 slice_path = os.path.join(slice_dir, f"{i:04d}_base_xyz.png")
                 vol_path = os.path.join(volumes_dir, f"base_{i:04d}.nii.gz")
@@ -384,7 +384,7 @@ def run_generation(args, paths, device, local_rank, world_size):
                 skip_real = os.path.exists(slice_path) and (not args.save_volume or os.path.exists(vol_path))
                 if not skip_real:
                     base_data = transform(base_files[i])
-                    base_images = base_data["image"].unsqueeze(0).to(device)
+                    base_images = base_data["image"].unsqueeze(0).to(device, dtype=weight_dtype)
                     save_wandb_style_xyz_plot(slice_transform(base_images.cpu()[0]), f"{i:04d}_base", slice_dir)
                     if args.save_volume:
                         nib.save(nib.Nifti1Image(base_images.cpu().numpy().squeeze().astype(np.float32), np.eye(4)), vol_path)

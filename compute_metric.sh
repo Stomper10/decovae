@@ -141,6 +141,10 @@ LATENT_STATS_CSV="${UNET_EXP_DIR}/analysis/latent_stats.csv"
 python3 - <<PY
 import json, os, sys
 m = json.load(open("${SCRIPT_DIR}/configs/${DATASET}/model_fm.json"))
+# Disable MAISI's norm_float16 training-memory trick for eval: it hard-casts
+# GroupNorm output to fp16, which crashes the next conv under fp32+no_amp.
+if isinstance(m.get("autoencoder_def"), dict):
+    m["autoencoder_def"]["norm_float16"] = False
 if "${EVAL_MODE}" == "real_vs_gen":
     d = json.load(open("${SCRIPT_DIR}/configs/${DATASET}/diff_train_inf.json"))
     # Flatten all diffusion_unet_inference keys to top-level so compute_metric.py

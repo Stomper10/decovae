@@ -362,6 +362,13 @@ def run_extract(args: argparse.Namespace) -> int:
     ext_args.val_json_data_list = valid_list
     ext_args.data_base_dir = args.data_dir
     ext_args.trained_autoencoder_path = args.trained_autoencoder_path
+    # MAISI's `norm_float16` hard-casts GroupNorm output to fp16, crashing the
+    # next conv under fp32 (no autocast) — same bug compute_metric.sh patches in
+    # its merged-config step. extract uses fp32 for cached pooled .npy inputs.
+    if isinstance(getattr(ext_args, "autoencoder_def", None), dict):
+        ext_args.autoencoder_def["norm_float16"] = False
+    if isinstance(getattr(ext_args, "mask_generation_autoencoder_def", None), dict):
+        ext_args.mask_generation_autoencoder_def["norm_float16"] = False
     # Thread dataset preprocessing into ext_args so create_transforms can read them.
     ext_args.orientation_axcodes = args.orientation_axcodes
     ext_args.intensity_norm = args.intensity_norm
