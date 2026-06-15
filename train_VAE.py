@@ -948,7 +948,7 @@ def main():
         # --------------------------------------------------------------
         # Periodic / shutdown checkpoint
         # --------------------------------------------------------------
-        is_time_to_save = (step % args.checkpointing_steps == 0 and step > start_step)
+        is_time_to_save = ((step % args.checkpointing_steps == 0 or step == args.max_train_steps) and step > start_step)
         if (is_time_to_save or SHUTDOWN_REQUESTED) and rank == 0:
             torch.cuda.synchronize(device)
             autoencoder_state_dict = autoencoder.module._orig_mod.state_dict()

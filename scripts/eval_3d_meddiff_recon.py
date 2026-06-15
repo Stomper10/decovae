@@ -111,7 +111,18 @@ def main():
     print(f"[recon] intensity norm percentiles=({args.norm_lower}, {args.norm_upper})", flush=True)
 
     df = pd.read_csv(args.base_csv)
-    files = [{"image": os.path.join(args.data_dir, rel)} for rel in df["rel_path"]][: args.num_images]
+    # Resolve the per-volume real-image path. Two manifest schemas are supported
+    # so 3DMD is scored against EXACTLY the same real volumes as MAISI/SID/VAD:
+    #   - pooled manifest: `cache_key` column -> {data_dir}/{cache_key}.npy
+    #     (the SAME .npy cache PooledAdapter.load_manifest feeds compute_metric.py)
+    #   - legacy UKB manifest: `rel_path` column -> {data_dir}/{rel_path} (raw nii)
+    if "cache_key" in df.columns:
+        rels = [f"{k}.npy" for k in df["cache_key"]]
+    elif "rel_path" in df.columns:
+        rels = list(df["rel_path"])
+    else:
+        raise KeyError(f"{args.base_csv} has neither 'cache_key' nor 'rel_path' column")
+    files = [{"image": os.path.join(args.data_dir, rel)} for rel in rels][: args.num_images]
     idxs = list(range(len(files)))[args.shard_index :: args.num_shards]
     os.makedirs(args.out_dir, exist_ok=True)
     print(f"[recon] shard {args.shard_index}/{args.num_shards}: {len(idxs)} of {len(files)} -> {args.out_dir}",
