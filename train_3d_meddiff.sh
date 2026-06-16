@@ -37,6 +37,21 @@ conda activate 3d_meddiff
 : "${CONFIG:=configs/3d_meddiff/PatchVolume_4x_ukb.yaml}"
 : "${EXP_NAME:=ukb_c4}"
 
+# STAGE selects the entry point (3DMD's own 2-phase AE recipe):
+#   stage1 (patch 64^3)        -> train_PatchVolume.py
+#   stage2 (whole-volume cont.) -> train_PatchVolume_stage2.py
+# stage2 inits from the converged stage1 ckpt (cfg.model.init_weights_from) on
+# first launch; on requeue the auto-resume block below injects stage2's OWN
+# highest-step ckpt into resume_from_checkpoint (full PL resume, no step reset).
+# Use a DISTINCT EXP_NAME per stage (e.g. pooled / pooled_s2) so checkpoints,
+# logs, default_root_dir, and the W&B run id stay separate.
+: "${STAGE:=stage1}"
+case "${STAGE}" in
+    stage1) ENTRY="train_PatchVolume.py" ;;
+    stage2) ENTRY="train_PatchVolume_stage2.py" ;;
+    *) echo "[FATAL] unknown STAGE='${STAGE}' (expected stage1|stage2)" >&2; exit 1 ;;
+esac
+
 # W&B logging — picked up by patches/3d_meddiff/wandb_logger.patch.
 # Unset WANDB_PROJECT_3DMD to fall back to TensorBoard-only behavior.
 : "${WANDB_PROJECT_3DMD:=decovae-3dmeddiff}"
@@ -55,6 +70,7 @@ exec >> "${EXP_LOG}" 2>&1
 echo "3D MedDiff PatchVolume baseline"
 echo "  config  : ${CONFIG}"
 echo "  exp_name: ${EXP_NAME}"
+echo "  stage   : ${STAGE} (entry: ${ENTRY})"
 echo "  job_id  : ${SLURM_JOB_ID}"
 
 # Auto-resume from the highest-step checkpoint. ModelCheckpoint writes two
@@ -106,6 +122,6 @@ function resubmit() {
 }
 trap 'resubmit' SIGUSR1
 
-srun python external/3d_meddiff/train/train_PatchVolume.py --config "${RUN_CONFIG}" &
+srun python external/3d_meddiff/train/${ENTRY} --config "${RUN_CONFIG}" &
 wait
 exit 0

@@ -182,13 +182,26 @@ class DiffusionModelUNetMaisiV2(DiffusionModelUNetMaisi):
         self.conditioning = conditioning
         self.use_token_set = bool(conditioning) and bool(conditioning.get("enabled", False))
         if self.use_token_set:
-            from patches.token_set_encoder import TokenSetEncoder
-            self.token_encoder = TokenSetEncoder(
-                attributes=conditioning["attributes"],
-                cond_dim=int(conditioning.get("cond_dim", 256)),
-                output_dim=time_embed_dim,
-                pool=conditioning.get("pool", "mean"),
-            )
+            # encoder: "mlp_concat" (default) = fixed one-hot/[val,flag] vector → MLP
+            # (MetaVectorEncoder); "token_set" = per-attribute tokens → mean-pool
+            # (TokenSetEncoder). Both consume (cond_cat,cond_cont,cond_presence) and
+            # emit (B, time_embed_dim) concatenated onto the time embedding.
+            enc_kind = conditioning.get("encoder", "mlp_concat")
+            if enc_kind == "token_set":
+                from patches.token_set_encoder import TokenSetEncoder
+                self.token_encoder = TokenSetEncoder(
+                    attributes=conditioning["attributes"],
+                    cond_dim=int(conditioning.get("cond_dim", 256)),
+                    output_dim=time_embed_dim,
+                    pool=conditioning.get("pool", "mean"),
+                )
+            else:
+                from patches.token_set_encoder import MetaVectorEncoder
+                self.token_encoder = MetaVectorEncoder(
+                    attributes=conditioning["attributes"],
+                    hidden_dim=int(conditioning.get("cond_dim", 256)),
+                    output_dim=time_embed_dim,
+                )
             new_time_embed_dim += time_embed_dim
 
         self.down_blocks = nn.ModuleList([])

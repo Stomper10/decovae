@@ -278,8 +278,9 @@ class TokenSetCondLoader:
 def cfg_drop_presence(presence, full_p, token_p, keep_idx=(0,)):
     """Classifier-free-guidance dropout on the presence mask (training only).
     Whole-set drop (→ null) with prob full_p; independent per-token drop with
-    prob token_p on every slot EXCEPT keep_idx (modality at index 0). Operates
-    only on already-present tokens — never fabricates absent ones."""
+    prob token_p — BOTH keep the keep_idx slots (modality at index 0), so the
+    "unconditional" baseline is modality-only (decision A: modality is always
+    conditioned). Operates only on already-present tokens — never fabricates absent."""
     pres = presence.clone()
     B, n = pres.shape
     if token_p > 0:
@@ -290,10 +291,12 @@ def cfg_drop_presence(presence, full_p, token_p, keep_idx=(0,)):
     if full_p > 0:
         whole = torch.rand(B, device=pres.device) < full_p
         pres[whole] = False
+        for k in keep_idx:                       # keep modality even on whole-set drop (A)
+            pres[whole, k] = presence[whole, k]
     return pres
 
 
-def prepare_transform(include_body_region: bool = False, cond_attributes=None):
+def prepare_transform(include_body_region: bool = False, cond_attributes=None, include_spacing: bool = True):
     def _load_data_from_file(file_path, key):
         with open(file_path) as f:
             return torch.FloatTensor(json.load(f)[key])
@@ -301,9 +304,14 @@ def prepare_transform(include_body_region: bool = False, cond_attributes=None):
     data_transforms_list = [
         monai.transforms.LoadImaged(keys=["image"]),
         monai.transforms.EnsureChannelFirstd(keys=["image"]),
-        monai.transforms.Lambdad(keys="spacing", func=lambda x: _load_data_from_file(x, "spacing")),
-        monai.transforms.Lambdad(keys="spacing", func=lambda x: x * 1e2),
     ]
+    # spacing is constant (1mm-isotropic) across the pooled corpus → uninformative;
+    # gated by the UNet's include_spacing_input (off for pooled). Mirrors include_body_region.
+    if include_spacing:
+        data_transforms_list += [
+            monai.transforms.Lambdad(keys="spacing", func=lambda x: _load_data_from_file(x, "spacing")),
+            monai.transforms.Lambdad(keys="spacing", func=lambda x: x * 1e2),
+        ]
     if cond_attributes is not None:
         # typed token-set: dict cond → fixed-slot cat/cont/presence tensors
         data_transforms_list.append(TokenSetCondLoader(cond_attributes))
@@ -325,14 +333,16 @@ def prepare_transform(include_body_region: bool = False, cond_attributes=None):
     return Compose(data_transforms_list)
 
 
-def build_file_list(filenames, embedding_base_dir, include_body_region):
+def build_file_list(filenames, embedding_base_dir, include_body_region, include_spacing=True):
     files = []
     for fname in filenames:
         str_img = os.path.join(embedding_base_dir, fname)
         if not os.path.exists(str_img):
             continue
         str_info = str_img + ".json"
-        item = {"image": str_img, "spacing": str_info, "cond": str_info}
+        item = {"image": str_img, "cond": str_info}
+        if include_spacing:
+            item["spacing"] = str_info
         if include_body_region:
             item["top_region_index"] = str_info
             item["bottom_region_index"] = str_info
@@ -427,6 +437,7 @@ def main():
     unet = define_instance(args, "diffusion_unet_def").to(device)
     noise_scheduler = define_instance(args, "noise_scheduler")
     include_body_region = unet.include_top_region_index_input
+    include_spacing = unet.include_spacing_input
     include_modality = unet.num_class_embeds is not None
     num_train_timesteps = args.noise_scheduler["num_train_timesteps"]
 
@@ -434,10 +445,10 @@ def main():
     # Data
     # ------------------------------------------------------------------
     filenames_train = load_filenames(train_json, "training", adapter)
-    train_files = build_file_list(filenames_train, embedding_base_dir, include_body_region)
+    train_files = build_file_list(filenames_train, embedding_base_dir, include_body_region, include_spacing)
 
     filenames_valid = load_filenames(valid_json, "validation", adapter)[:args.num_valid]
-    valid_files = build_file_list(filenames_valid, embedding_base_dir, include_body_region)
+    valid_files = build_file_list(filenames_valid, embedding_base_dir, include_body_region, include_spacing)
 
     if rank == 0:
         print(f"Total number of training data is {len(train_files)}.")
@@ -446,6 +457,7 @@ def main():
     data_transform = prepare_transform(
         include_body_region=include_body_region,
         cond_attributes=cond_cfg["attributes"] if use_token_set else None,
+        include_spacing=include_spacing,
     )
 
     workers_per_gpu = args.cpus_per_task // world_size
@@ -546,7 +558,7 @@ def main():
             bottom_region_index_tensor = batch["bottom_region_index"].to(device)
         if include_modality:
             modality_tensor = torch.ones((len(images),), dtype=torch.long).to(device)
-        spacing_tensor = batch["spacing"].to(device, non_blocking=True)
+        spacing_tensor = batch["spacing"].to(device, non_blocking=True) if include_spacing else None
         if use_token_set:
             presence = cfg_drop_presence(
                 batch["cond_presence"].to(device, non_blocking=True), cfg_full_p, cfg_token_p)
@@ -640,7 +652,7 @@ def main():
             with torch.no_grad():
                 for val_batch in valid_loader:
                     val_images = (val_batch["image"].to(device, non_blocking=True) - global_mean) * scale_factor
-                    spacing_tensor = val_batch["spacing"].to(device, non_blocking=True)
+                    spacing_tensor = val_batch["spacing"].to(device, non_blocking=True) if include_spacing else None
                     if use_token_set:
                         # no CFG drop at validation — use the true token set
                         meta_tensor = {

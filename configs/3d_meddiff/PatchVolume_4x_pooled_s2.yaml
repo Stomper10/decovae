@@ -9,12 +9,16 @@
 #   python external/3d_meddiff/train/train_PatchVolume_stage2.py \
 #     --config configs/3d_meddiff/PatchVolume_4x_pooled_s2.yaml
 #
-# stage2 inits ALL weights from the converged stage1 checkpoint via
-# `resume_from_checkpoint` (torch.load -> load_state_dict; decoder+disc train,
-# encoder frozen). Set resume_from_checkpoint to the chosen stage1 ckpt below
-# (or let train_3d_meddiff.sh inject it). NOTE: this is a DIFFERENT entry point
-# than stage1 (train_PatchVolume_stage2.py) — the launcher must select it for
-# STAGE=stage2.
+# stage2 init vs resume are DECOUPLED (mirrors MAISI train_VAE.py Design B):
+#   - init_weights_from : the converged stage1 ckpt. Used ONCE on the first
+#     launch — torch.load -> load_state_dict (decoder+disc fine-tune, encoder
+#     frozen by AE_finetuning), fresh optimizer + global_step=0.
+#   - resume_from_checkpoint : stage2's OWN ckpt. Used on SLURM requeue — passed
+#     as PL `ckpt_path` for a FULL resume (restores global_step/optimizer/epoch).
+#     Leave empty here; train_3d_meddiff.sh auto-injects the highest-step stage2
+#     ckpt on requeue. resume takes priority over init when both are set.
+# NOTE: DIFFERENT entry point than stage1 (train_PatchVolume_stage2.py) — the
+# launcher selects it for STAGE=stage2.
 #
 # COMPUTE / FAIRNESS = (B) converged-best (2026-06-06 decision): train to its
 # own convergence plateau, GPU-hour floor >= MAISI total, report GPU-hours +
@@ -31,7 +35,10 @@ model:
 
   gpus: 8
   default_root_dir: /data/wonyoungjang/decodata/3d_meddiff/pooled_s2
-  resume_from_checkpoint:        # <- converged pooled stage1 ckpt (.ckpt)
+  resume_from_checkpoint:        # stage2's OWN ckpt (requeue); empty on first launch — launcher auto-injects
+  # converged stage1 = global_step 82,416 (rFID-best, 2026-06-16 sweep). This is
+  # a rolling val-best slot (latest_checkpoint.ckpt) — pin a copy if stage1 ever reruns.
+  init_weights_from: /data/wonyoungjang/decodata/3d_meddiff/pooled/my_model/version_0/checkpoints/latest_checkpoint.ckpt
   max_steps: 1000000
   max_epochs: 10000
   precision: bf16

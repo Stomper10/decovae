@@ -17,11 +17,57 @@
         "cfg_drop_prob": 0.15,
         "per_token_drop_prob": 0.1,
         "attributes": [
-            {"name": "modality", "type": "cat", "vocab": ["T1", "T2", "FLAIR"]},
-            {"name": "sex", "type": "cat", "vocab": ["M", "F"]},
-            {"name": "dx", "type": "cat", "vocab": ["healthy", "MCI", "AD", "tumor"]},
-            {"name": "age", "type": "cont", "min": 20, "max": 97},
-            {"name": "cdrsb", "type": "cont", "min": 0, "max": 18}
+            {
+                "name": "modality",
+                "type": "cat",
+                "vocab": [
+                    "T1",
+                    "T2",
+                    "FLAIR"
+                ]
+            },
+            {
+                "name": "sex",
+                "type": "cat",
+                "vocab": [
+                    "M",
+                    "F"
+                ]
+            },
+            {
+                "name": "dx",
+                "type": "cat",
+                "vocab": [
+                    "healthy",
+                    "MCI",
+                    "AD",
+                    "tumor"
+                ]
+            },
+            {
+                "name": "cohort",
+                "type": "cat",
+                "vocab": [
+                    "ukb",
+                    "ixi",
+                    "hcp",
+                    "brats",
+                    "adni",
+                    "oasis"
+                ]
+            },
+            {
+                "name": "age",
+                "type": "cont",
+                "min": 20,
+                "max": 97
+            },
+            {
+                "name": "cdrsb",
+                "type": "cont",
+                "min": 0,
+                "max": 18
+            }
         ]
     },
     "autoencoder_def": {
@@ -35,7 +81,11 @@
             128,
             256
         ],
-        "num_res_blocks": [2,2,2],
+        "num_res_blocks": [
+            2,
+            2,
+            2
+        ],
         "norm_num_groups": 32,
         "norm_eps": 1e-06,
         "attention_levels": [
@@ -57,7 +107,12 @@
         "spatial_dims": "@spatial_dims",
         "in_channels": "@latent_channels",
         "out_channels": "@latent_channels",
-        "num_channels": [64, 128, 256, 512],
+        "num_channels": [
+            64,
+            128,
+            256,
+            512
+        ],
         "attention_levels": [
             false,
             false,
@@ -85,7 +140,12 @@
         "_target_": "monai.apps.generation.maisi.networks.controlnet_maisi.ControlNetMaisi",
         "spatial_dims": "@spatial_dims",
         "in_channels": "@latent_channels",
-        "num_channels": [64, 128, 256, 512],
+        "num_channels": [
+            64,
+            128,
+            256,
+            512
+        ],
         "attention_levels": [
             false,
             false,
@@ -101,7 +161,11 @@
         "num_res_blocks": 2,
         "use_flash_attention": true,
         "conditioning_embedding_in_channels": 8,
-        "conditioning_embedding_num_channels": [8, 32, 64],
+        "conditioning_embedding_num_channels": [
+            8,
+            32,
+            64
+        ],
         "resblock_updown": true,
         "include_fc": true
     },
@@ -116,7 +180,11 @@
             64,
             128
         ],
-        "num_res_blocks": [1, 2, 2],
+        "num_res_blocks": [
+            1,
+            2,
+            2
+        ],
         "norm_num_groups": 32,
         "norm_eps": 1e-06,
         "attention_levels": [
@@ -138,9 +206,24 @@
         "spatial_dims": "@spatial_dims",
         "in_channels": "@latent_channels",
         "out_channels": "@latent_channels",
-        "channels":[64, 128, 256, 512],
-        "attention_levels":[false, false, true, true],
-        "num_head_channels":[0, 0, 32, 32],
+        "channels": [
+            64,
+            128,
+            256,
+            512
+        ],
+        "attention_levels": [
+            false,
+            false,
+            true,
+            true
+        ],
+        "num_head_channels": [
+            0,
+            0,
+            32,
+            32
+        ],
         "num_res_blocks": 2,
         "use_flash_attention": true,
         "with_conditioning": true,
@@ -154,7 +237,7 @@
         "use_discrete_timesteps": false,
         "use_timestep_transform": true,
         "sample_method": "uniform",
-        "scale":1.4
+        "scale": 1.4
     },
     "mask_generation_noise_scheduler": {
         "_target_": "monai.networks.schedulers.ddpm.DDPMScheduler",

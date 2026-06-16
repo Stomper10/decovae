@@ -1,4 +1,4 @@
-"""Extract 3D-MedDiffusion PatchVolume latents for the UKB c=4 baseline.
+"""Extract 3D-MedDiffusion PatchVolume latents (UKB c=4 nii OR pooled .npy cache).
 
 This is the DecoVAE-side wrapper around the upstream Phase 3 step
 (`external/3d_meddiff/train/generate_training_latent.py`). The upstream script
@@ -6,6 +6,18 @@ assumes the upstream `{class: dir}` JSON schema, no intensity normalization,
 and 64-divisible volumes — none of which hold for our UKB MNI data. We
 reproduce the *training-time* preprocessing exactly and add a MAISI-aligned
 resize so the latent grid matches `extract_emb.py`:
+
+POOLED (.npy) PATH: when a data-json entry ends in `.npy` it is the preprocessed
+pooled cache (fp16 192^3, already percentile-normalized to [0,1] — the SAME
+input the pooled VAE/3DMD training consumed). We load it straight to a tensor and
+SKIP both the RescaleIntensity AND the round-128 resize: 192 is already a
+multiple of patch_size=64, so patch_encode tiles cleanly into a [8, 48, 48, 48]
+latent (same 48^3 spatial grid as the pooled MAISI latent; only channels differ).
+Resizing 192->256 would change the latent geometry, so it must NOT run for .npy.
+Since stage2 freezes encoder+pre_vq_conv+codebook, these latents are identical
+whether extracted from the stage1 or the final stage2 ckpt (extract from stage1).
+
+UKB (.nii) PATH (unchanged):
 
   1. explicit-split JSON  {"train": [paths], "val": [paths]}  (our schema)
   2. intensity:  tio.RescaleIntensity(out_min_max=(0,1), percentiles=(0.5,99.5))
@@ -46,6 +58,9 @@ def round_number(n: int, base: int = 128) -> int:
 
 
 def subject_id(path: str) -> str:
+    # pooled .npy cache: basename without ext IS the cache_key (e.g. ukb_1907867_T1)
+    if path.endswith(".npy"):
+        return os.path.splitext(os.path.basename(path))[0]
     # /data/.../20252_unzip/<SUBJECT_DIR>/T1/T1_brain_to_MNI.nii.gz  -> <SUBJECT_DIR>
     parts = path.rstrip("/").split("/")
     return parts[-3] if len(parts) >= 3 else os.path.splitext(os.path.basename(path))[0]
@@ -93,15 +108,22 @@ def main() -> None:
             done += 1
             continue
         try:
-            img = tio.ScalarImage(fp)
-            img = rescale(img)
-            # round each spatial dim to a multiple of resize-base, then resize.
-            shp = img.spatial_shape  # (W, H, D) in torchio order
-            new_shape = tuple(round_number(int(s), args.resize_base) for s in shp)
-            img = tio.Resize(new_shape, image_interpolation="linear")(img)
+            if fp.endswith(".npy"):
+                # pooled cache: already [0,1] at 192^3 (mult. of 64). Mirror the
+                # training loader's .npy branch (vqgan_4x.py): load straight to a
+                # tensor, SKIP RescaleIntensity + the round-128 resize.
+                arr = np.squeeze(np.load(fp)).astype("float32")
+                data = torch.from_numpy(arr)[None]      # [1, D, H, W] in [0,1]
+            else:
+                img = tio.ScalarImage(fp)
+                img = rescale(img)
+                # round each spatial dim to a multiple of resize-base, then resize.
+                shp = img.spatial_shape  # (W, H, D) in torchio order
+                new_shape = tuple(round_number(int(s), args.resize_base) for s in shp)
+                img = tio.Resize(new_shape, image_interpolation="linear")(img)
+                data = img.data.to(torch.float32)       # [1, *new_shape]
 
-            x = img.data.to(torch.float32)          # [1, *new_shape]
-            x = x * 2.0 - 1.0                        # match training [-1, 1]
+            x = data * 2.0 - 1.0                     # match training [-1, 1]
             x = x.transpose(1, 3).transpose(2, 3)    # Singleres axis convention
             x = x.unsqueeze(0).to(device)            # [1, 1, D, H, W]
 

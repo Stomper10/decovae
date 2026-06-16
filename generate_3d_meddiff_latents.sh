@@ -1,8 +1,17 @@
 #!/bin/bash
-# Phase 3 launcher: extract 3D-MedDiffusion PatchVolume latents for UKB c=4.
+# Phase 3 launcher: extract 3D-MedDiffusion PatchVolume latents (diffusion input).
 #
-# Single-GPU inference job (encode-only). Override at submission time:
-#   SPLIT=val sbatch generate_3d_meddiff_latents.sh
+# Defaults to the POOLED corpus (data_pooled.json .npy cache, AE = converged
+# stage1 ckpt latest_checkpoint.ckpt = global_step 82,416). The extractor only
+# touches encoder+pre_vq_conv+codebook, which 3DMD's stage2 FREEZES — so these
+# latents are identical whether taken from stage1 or the final stage2 ckpt
+# (extract from stage1 82k anytime, no need to wait for stage2). NOTE: AIBIO
+# cap=1 is GLOBAL across 4farm+8farm, so this job and the 8farm stage2 do NOT
+# co-run — they serialize. C is cheap (~1h); run it first, then stage2.
+# For the old UKB c=4 baseline, override DATA_JSON / EXP_NAME / AE_CKPT.
+#
+# Encode-only inference job (4-GPU shard). Override at submission time:
+#   SPLITS=val sbatch generate_3d_meddiff_latents.sh
 #   MAX_SAMPLES=16 sbatch generate_3d_meddiff_latents.sh   # smoke test
 #
 # gpu-4farm QoS (gpu4) enforces a per-job minimum of 4 GPUs (1-GPU requests sit
@@ -28,10 +37,10 @@ fi
 source ~/miniconda3/bin/activate 2>/dev/null || source ~/.bashrc
 conda activate 3d_meddiff
 
-: "${DATA_JSON:=configs/3d_meddiff/data_ukb.json}"
+: "${DATA_JSON:=configs/3d_meddiff/data_pooled.json}"
 : "${SPLITS:=train val}"   # space-separated; processed sequentially in one job
-: "${EXP_NAME:=ukb_c4}"
-: "${AE_CKPT:=/data/wonyoungjang/decodata/3d_meddiff/ukb_c4/my_model/version_2/checkpoints/epoch=1685-step=300000-train/recon_loss=0.15.ckpt}"
+: "${EXP_NAME:=pooled}"
+: "${AE_CKPT:=/data/wonyoungjang/decodata/3d_meddiff/pooled/my_model/version_0/checkpoints/latest_checkpoint.ckpt}"
 : "${OUT_DIR:=/data/wonyoungjang/decodata/3d_meddiff/${EXP_NAME}/latents}"
 
 EXP_ROOT="/data/wonyoungjang/decodata/3d_meddiff/${EXP_NAME}"
