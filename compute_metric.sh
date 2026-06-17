@@ -40,6 +40,11 @@ fi
 : "${EVAL_MODE:=real_vs_recon}"        # real_vs_real | real_vs_recon | real_vs_gen
 : "${PHASE:=all}"                    # generate | fid | all
 : "${NUM_IMAGES:=2500}"
+: "${SEED:=42}"
+# FID_BOOTSTRAP>0 → report FID mean±std+95% CI over N resamples (finite-sample
+# uncertainty; CPU on gathered features). 0 = point estimate. For generation-seed
+# variance instead, submit with different SEED and aggregate the per-run FIDs.
+: "${FID_BOOTSTRAP:=0}"
 : "${POSTFIX:=30step}"
 : "${DATASET:=ukb_20252}"
 source "${SCRIPT_DIR}/scripts/resolve_dataset.sh"
@@ -212,7 +217,9 @@ srun --cpu-bind=none,v --accel-bind=g torchrun \
       ${AMP_ARG} \
       --weight_dtype "${WEIGHT_DTYPE}" \
       --postfix "${POSTFIX}" \
+      --seed "${SEED}" \
       --guidance_scale "${GUIDANCE_SCALE}" \
+      --fid_bootstrap "${FID_BOOTSTRAP}" \
       --base_label_dir "${BASE_CSV}" \
       --other_label_dir "${OTHER_CSV}" \
       --data_dir "${DATA_DIR}" \

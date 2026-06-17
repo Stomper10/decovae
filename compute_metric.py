@@ -121,6 +121,14 @@ def load_config():
     parser.add_argument("--fid_padding", type=lambda s: str(s).lower() == "true", default=True)
     parser.add_argument("--fid_center_cropping", type=lambda s: str(s).lower() == "true", default=True)
     parser.add_argument("--fid_ignore_existing", type=lambda s: str(s).lower() == "true", default=True)
+    parser.add_argument("--fid_bootstrap", type=int, default=0,
+                        help="If >0, bootstrap-resample the gathered feature sets this "
+                             "many times (with replacement, seeded by --seed) to report "
+                             "FID mean ± std + 95%% CI per plane and for the 3-plane avg. "
+                             "Quantifies finite-sample FID uncertainty so small model "
+                             "gaps (e.g. SID/VAD vs MAISI ~1pt) are statistically "
+                             "credible. 0 = point estimate only (current behavior). "
+                             "Runs on CPU over already-extracted features (no GPU/regen).")
 
     args = parser.parse_args()
 
@@ -849,6 +857,43 @@ def run_fid(args, paths, device, local_rank, world_size):
         logger.info(f"FID YZ : {fid_yz}")
         logger.info(f"FID ZX : {fid_zx}")
         logger.info(f"FID Avg: {(fid_xy + fid_yz + fid_zx) / 3.0}")
+
+        # ---- bootstrap standard error (finite-sample FID uncertainty) ----
+        # Resample synth + real feature rows (with replacement) B times → bootstrap
+        # std = standard error of the FID estimate. Cheap (CPU, reuses gathered
+        # features), reproducible via --seed.
+        #   ⚠️ FID is biased UPWARD as effective sample size shrinks, so the
+        #   resample MEAN sits above the full-sample point estimate — do NOT report
+        #   the resample mean as the FID. We report the POINT estimate as the value
+        #   and the bootstrap std as its SE (CI = point ± 1.96·SE). For MODEL-vs-MODEL
+        #   gaps (MAISI↔SID↔VAD) this bias is common-mode and cancels in the
+        #   difference, so the SE is what tells you whether a ~1pt gap is real.
+        if getattr(args, "fid_bootstrap", 0) and args.fid_bootstrap > 0:
+            B = int(args.fid_bootstrap)
+            rng = np.random.default_rng(args.seed)
+            point = {"XY": float(fid_xy), "YZ": float(fid_yz), "ZX": float(fid_zx)}
+            point["AVG"] = sum(point.values()) / 3.0
+            planes = {"XY": (sxy, rxy), "YZ": (syz, ryz), "ZX": (szx, rzx)}
+            n_s, n_r = sxy.shape[0], rxy.shape[0]
+            boot = {k: [] for k in planes}
+            boot["AVG"] = []
+            logger.info(f"FID bootstrap SE: B={B}, n_synth={n_s}, n_real={n_r}, seed={args.seed}")
+            for _ in range(B):
+                si = torch.from_numpy(rng.integers(0, n_s, n_s))
+                ri = torch.from_numpy(rng.integers(0, n_r, n_r))
+                vals = []
+                for k, (s, r) in planes.items():
+                    v = float(fid(s[si], r[ri]))
+                    boot[k].append(v)
+                    vals.append(v)
+                boot["AVG"].append(sum(vals) / 3.0)
+            for k in ("XY", "YZ", "ZX", "AVG"):
+                se = float(np.asarray(boot[k]).std())
+                rmean = float(np.asarray(boot[k]).mean())
+                p = point[k]
+                logger.info(f"FID {k:3s}: point {p:.4f}  SE {se:.4f}  "
+                            f"~95% CI [{p - 1.96 * se:.4f}, {p + 1.96 * se:.4f}]  "
+                            f"(resample mean {rmean:.4f} — biased↑, not the estimate)")
 
 
 # =============================================================================
