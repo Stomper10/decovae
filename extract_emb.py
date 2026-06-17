@@ -254,11 +254,13 @@ def _encode_all(ext_args, num_gpus, adapter):
     # For cached input there is no round-to-128 resize — encode at native 192^3.
     cached_transforms = plain_transforms if cached else None
 
-    for split, list_path, key in [
-        ("training", ext_args.json_data_list, "training"),
-        ("validation", ext_args.val_json_data_list, "validation"),
+    for split, image_list, list_path, key in [
+        ("training", getattr(ext_args, "train_image_list", None), ext_args.json_data_list, "training"),
+        ("validation", getattr(ext_args, "val_image_list", None), ext_args.val_json_data_list, "validation"),
     ]:
-        filenames = load_filenames(list_path, key)
+        # prefer the in-memory, per-rank-rebuilt list (race-free); fall back to the
+        # on-disk json only if a caller didn't populate it.
+        filenames = image_list if image_list is not None else load_filenames(list_path, key)
         logger.info(f"{split}: {len(filenames)} files (cached={cached})")
         for i, filepath in enumerate(filenames):
             if i % world_size != local_rank:
@@ -344,15 +346,24 @@ def run_extract(args: argparse.Namespace) -> int:
     train_list = os.path.join(args.work_dir, "train_files.json")
     valid_list = os.path.join(args.work_dir, "valid_files.json")
 
+    # Build split file lists from the STATIC manifest CSV. Every rank rebuilds them
+    # independently (deterministic, same order) so _encode_all never cross-reads a
+    # rank-0-written json — that read raced under torchrun on a networked FS:
+    #   (a) fresh dir   -> FileNotFoundError (existence not yet visible on other node)
+    #   (b) prior file  -> STALE content read from NFS attr cache (silent: extracts
+    #                       on an old manifest's slices)
+    #   (c) mid-write   -> truncated -> JSONDecodeError
+    # The init_process_group rendezvous already orders rank-0-write before the reads
+    # at the PROCESS level, so a dist.barrier() doesn't help (the gap is FS metadata
+    # visibility, not process ordering). Rebuilding from the static CSV sidesteps it.
+    # rank 0 still writes the json for downstream consumers (train_UNET).
+    train_images = [x["image"] for x in adapter.load_manifest(args.train_label_dir, args.data_dir)]
+    valid_images = [x["image"] for x in adapter.load_manifest(args.valid_label_dir, args.data_dir)]
     if local_rank == 0:
-        train_files = adapter.load_manifest(args.train_label_dir, args.data_dir)
-        valid_files = adapter.load_manifest(args.valid_label_dir, args.data_dir)
-        # extract_emb.py datalist convention strips the "class" key (only image
-        # path is needed downstream), so we drop it here for backward compat.
         with open(train_list, "w") as f:
-            json.dump({"training": [{"image": x["image"]} for x in train_files]}, f)
+            json.dump({"training": [{"image": x} for x in train_images]}, f)
         with open(valid_list, "w") as f:
-            json.dump({"validation": [{"image": x["image"]} for x in valid_files]}, f)
+            json.dump({"validation": [{"image": x} for x in valid_images]}, f)
 
     # Build configs from JSON; override paths to absolute work_dir-rooted ones.
     ext_args = load_config(args.config_environment, args.config_diff_train_inf,
@@ -373,6 +384,10 @@ def run_extract(args: argparse.Namespace) -> int:
     ext_args.orientation_axcodes = args.orientation_axcodes
     ext_args.intensity_norm = args.intensity_norm
     ext_args.cached_input = bool(getattr(args, "cached_input", False))
+    # In-memory split lists (rebuilt per-rank above) — _encode_all consumes these
+    # instead of re-reading the raced json off disk.
+    ext_args.train_image_list = train_images
+    ext_args.val_image_list = valid_images
 
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
