@@ -93,6 +93,13 @@ def load_config():
                              "recon; removes the sampling-noise asymmetry vs VQ models)")
     parser.add_argument("--postfix", type=str, default="30step")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--guidance_scale", type=float, default=1.0,
+                        help="real_vs_gen classifier-free guidance scale. 1.0 = no "
+                             "guidance (single conditional pass, backwards-compatible). "
+                             ">1.0 runs a second 'null' pass (modality-only, mirroring "
+                             "the training whole-set drop) and combines: "
+                             "out = null + g*(cond - null). Only used when conditioning "
+                             "is enabled; ignored for the legacy scalar-meta path.")
 
     # Generation phase
     parser.add_argument("--base_label_dir", type=str, default=None)
@@ -296,6 +303,15 @@ def run_generation(args, paths, device, local_rank, world_size):
         weight_dtype, amp_dtype = torch.float32, torch.bfloat16
     cond_cfg = getattr(args, "conditioning", None)
     use_token_set = bool(cond_cfg) and bool(cond_cfg.get("enabled", False))
+    guidance_scale = float(getattr(args, "guidance_scale", 1.0))
+    # CFG null baseline = modality-only, mirroring the training whole-set drop
+    # (cfg_drop_presence keep_idx). keep_idx is configurable but defaults to (0,)
+    # = modality (first categorical attribute), per decision A.
+    cfg_keep_idx = tuple(cond_cfg.get("cfg_keep_idx", (0,))) if use_token_set else (0,)
+    use_cfg = use_token_set and guidance_scale != 1.0
+    if local_rank == 0 and use_token_set:
+        logger.info(f"[gen] conditioning ON | guidance_scale={guidance_scale} "
+                    f"| CFG={'on' if use_cfg else 'off'} | null=modality-only(keep_idx={cfg_keep_idx})")
     transform, gen_transform, slice_transform = build_transforms(weight_dtype, args)
     autoencoder, unet, noise_scheduler, loss_perceptual, scale_factor, global_mean = \
         load_models(args, device)
@@ -403,14 +419,30 @@ def run_generation(args, paths, device, local_rank, world_size):
                 spacing_tensor = np.array(args.inference_spacing).astype(float) * 1e2
                 spacing_tensor = torch.from_numpy(spacing_tensor[np.newaxis, :]).to(device, dtype=weight_dtype)
 
+                null_meta_tensor = None
                 if use_token_set:
                     from patches.token_set_encoder import encode_token_set
                     ci, cv, pr = encode_token_set(meta_values[i], cond_cfg["attributes"])
+                    cond_cat = torch.tensor([ci], dtype=torch.long, device=device)
+                    cond_cont = torch.tensor([cv], dtype=torch.float32, device=device)
+                    cond_presence = torch.tensor([pr], dtype=torch.bool, device=device)
                     meta_tensor = {
-                        "cond_cat": torch.tensor([ci], dtype=torch.long, device=device),
-                        "cond_cont": torch.tensor([cv], dtype=torch.float32, device=device),
-                        "cond_presence": torch.tensor([pr], dtype=torch.bool, device=device),
+                        "cond_cat": cond_cat,
+                        "cond_cont": cond_cont,
+                        "cond_presence": cond_presence,
                     }
+                    if use_cfg:
+                        # null = modality-only: drop every attribute except keep_idx,
+                        # preserving the original (present) value at the kept slots.
+                        # Mirrors cfg_drop_presence's whole-set drop in train_UNET.
+                        null_presence = torch.zeros_like(cond_presence)
+                        for k in cfg_keep_idx:
+                            null_presence[:, k] = cond_presence[:, k]
+                        null_meta_tensor = {
+                            "cond_cat": cond_cat,
+                            "cond_cont": cond_cont,
+                            "cond_presence": null_presence,
+                        }
                 else:
                     meta_tensor = torch.tensor([[meta_values[i]]], device=device, dtype=weight_dtype)
 
@@ -427,6 +459,12 @@ def run_generation(args, paths, device, local_rank, world_size):
                             "meta_tensor": meta_tensor,
                         }
                         model_output = unet(**unet_inputs)
+                        if use_cfg:
+                            # second pass with the modality-only null conditioning,
+                            # then classifier-free guidance on the model output
+                            # (velocity for RFlow): out = null + g*(cond - null).
+                            null_output = unet(**{**unet_inputs, "meta_tensor": null_meta_tensor})
+                            model_output = null_output + guidance_scale * (model_output - null_output)
                         latent, _ = noise_scheduler.step(
                             model_output, t, latent, next_t,
                             args.stochastic_scale,
@@ -440,6 +478,19 @@ def run_generation(args, paths, device, local_rank, world_size):
                     if args.save_volume:
                         nib.save(nib.Nifti1Image(transformed_synthetic.cpu().numpy().squeeze().astype(np.float32),
                                                  np.eye(4)), expected_nii_path)
+                        # Adherence sidecar: record the INTENDED condition this
+                        # volume was generated from, so scripts/adherence_eval.py
+                        # can compare predictor(gen) vs the condition. Only the
+                        # token-set path carries a structured metadata dict.
+                        if use_token_set:
+                            cond_raw = meta_values[i]
+                            cond_json = {k: (None if v is None else
+                                             (float(v) if isinstance(v, (int, float, np.floating))
+                                              else str(v)))
+                                         for k, v in dict(cond_raw).items()}
+                            cond_json["guidance_scale"] = guidance_scale
+                            with open(expected_nii_path.replace(".nii.gz", ".cond.json"), "w") as cf:
+                                json.dump(cond_json, cf)
 
     # Aggregate recon metrics across ranks
     if args.eval_mode == "real_vs_recon":
@@ -825,7 +876,8 @@ def main():
         logger.info("  -- generation / inference hyperparams --")
         for k in ("num_inference_steps", "scale_factor", "global_mean",
                   "stochastic_scale", "latent_channels", "latent_shape",
-                  "inference_spacing", "weight_dtype", "amp", "postfix"):
+                  "inference_spacing", "weight_dtype", "amp", "postfix",
+                  "guidance_scale"):
             if hasattr(args, k):
                 logger.info(f"    {k:22s}: {getattr(args, k)}")
         logger.info("  -- preprocessing / resolution --")

@@ -55,3 +55,43 @@ class SFCN(nn.Module):
 
 def build_sfcn(in_channels: int = 1, dropout: float = 0.5) -> SFCN:
     return SFCN(in_channels=in_channels, dropout=dropout)
+
+
+class SFCNClassifier(nn.Module):
+    """SFCN backbone with a classification head — adherence predictors for the
+    categorical conditioning attributes (sex; dx = AD/MCI/CN or 4-way).
+
+    Shares Peng et al.'s conv progression with :class:`SFCN`, but replaces the
+    fixed-kernel AvgPool + scalar head with ``AdaptiveAvgPool3d(1)`` (so it is
+    robust to the generated-volume resolution) + a linear logits head. The same
+    module covers binary (sex, num_classes=2) and multi-class (dx) targets.
+    """
+
+    def __init__(self, num_classes: int, in_channels: int = 1, dropout: float = 0.5) -> None:
+        super().__init__()
+        self.features = nn.Sequential(
+            _conv_block(in_channels, 32),
+            _conv_block(32, 64),
+            _conv_block(64, 128),
+            _conv_block(128, 256),
+            _conv_block(256, 256),
+            nn.Sequential(
+                nn.Conv3d(256, 64, kernel_size=1, bias=False),
+                nn.BatchNorm3d(64),
+                nn.ReLU(inplace=True),
+            ),
+        )
+        self.pool = nn.AdaptiveAvgPool3d(1)
+        self.dropout = nn.Dropout(dropout)
+        self.head = nn.Linear(64, num_classes)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.features(x)
+        x = self.pool(x).flatten(1)   # (B, 64)
+        x = self.dropout(x)
+        return self.head(x)            # (B, num_classes) logits
+
+
+def build_sfcn_classifier(num_classes: int, in_channels: int = 1,
+                          dropout: float = 0.5) -> SFCNClassifier:
+    return SFCNClassifier(num_classes=num_classes, in_channels=in_channels, dropout=dropout)

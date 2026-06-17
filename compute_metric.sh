@@ -60,33 +60,60 @@ DET_ARG=""; [[ "${DETERMINISTIC}" == "1" ]] && DET_ARG="--deterministic_recon"
 : "${WEIGHT_DTYPE:=fp32}"
 : "${NO_AMP:=1}"
 AMP_ARG=""; [[ "${NO_AMP}" == "1" ]] && AMP_ARG="--no_amp"
-# CELL (pooled only): restrict the real/conditioning set to one cohort×modality
-# cell "cohort_modality" (e.g. adni_FLAIR) → per-(modality×cohort) FID. Outputs
-# are namespaced under cells/<CELL> so independent cells don't collide; run one
-# sbatch per cell (loop). Empty = whole base CSV (single pooled FID).
+# CELL (pooled only): restrict the real/conditioning set to one evaluation cell.
+#   "cohort_modality" (e.g. adni_FLAIR) → per-(cohort×modality) FID  [granularity A]
+#   "all_modality"    (e.g. all_FLAIR)  → per-modality FID, all cohorts [granularity B]
+# (cohort token "all"/"any"/"pooled" skips the cohort filter.) Outputs are
+# namespaced under cells/<tag> so independent cells don't collide; run one sbatch
+# per cell (loop). Empty = whole base CSV (single pooled FID).
 : "${CELL:=}"
+# GUIDANCE_SCALE (real_vs_gen only): classifier-free guidance scale passed to
+# compute_metric.py. 1.0 = no guidance (single conditional pass, current behavior).
+# >1.0 runs the modality-only null pass and combines out=null+g*(cond-null).
+# A guidance sweep reuses the same EXP_NAME, so g!=1.0 namespaces its outputs by a
+# 'g<scale>' tag (e.g. g20) to avoid clobbering across scales.
+: "${GUIDANCE_SCALE:=1.0}"
 
 # ----------------------------------------------------------------------
 # Experiment directory tree + log
 # ----------------------------------------------------------------------
-# Weights / latent-stats always live under the main experiment dir; per-cell
-# evaluation only namespaces the OUTPUT dir (volumes/features/filelists).
+# Weights / latent-stats always live under the main experiment dir; per-cell and
+# per-guidance evaluation only namespaces the OUTPUT dir (volumes/features/filelists).
 MAIN_EXP_DIR="${OUTPUT_DIR_BASE}/${EXP_NAME}"
+
+# guidance tag (real_vs_gen + g!=1.0 only): 2.0 -> g20, 1.5 -> g15
+GTAG=""
+if [[ "${EVAL_MODE}" == "real_vs_gen" \
+   && "${GUIDANCE_SCALE}" != "1.0" && "${GUIDANCE_SCALE}" != "1" ]]; then
+    GTAG="g$(printf '%s' "${GUIDANCE_SCALE}" | tr -d '.')"
+fi
+
+# (1) conditioning-set CSV filter — only when CELL set (guidance-independent, so
+#     the filtered CSV is shared across a guidance sweep).
 if [[ -n "${CELL}" ]]; then
-    # write a per-cell base CSV (filter cohort×modality) and isolate outputs
     CELL_COHORT="${CELL%_*}"; CELL_MOD="${CELL##*_}"
     CELL_CSV="${MAIN_EXP_DIR}/cells/${CELL}/base_${CELL}.csv"
     mkdir -p "$(dirname "${CELL_CSV}")"
     python3 - <<PY
 import pandas as pd
 df = pd.read_csv("${BASE_CSV}")
-df = df[(df["cohort"]=="${CELL_COHORT}") & (df["modality"]=="${CELL_MOD}")]
+df = df[df["modality"] == "${CELL_MOD}"]
+coh = "${CELL_COHORT}"
+if coh not in ("all", "any", "pooled"):      # 'all_<mod>' = per-modality (B), all cohorts
+    df = df[df["cohort"] == coh]              # 'cohort_<mod>' = per-cohort×modality (A)
 df.to_csv("${CELL_CSV}", index=False)
 print(f"[compute_metric.sh] CELL ${CELL}: {len(df)} real volumes -> ${CELL_CSV}")
 PY
     BASE_CSV="${CELL_CSV}"
-    POSTFIX="${POSTFIX}_${CELL}"
-    EXP_DIR="${MAIN_EXP_DIR}/cells/${CELL}"
+fi
+
+# (2) output isolation + postfix from the combined {CELL, GTAG} tag. With CELL set
+#     and g=1.0 this reduces to the previous cells/<CELL> layout (backwards-compatible).
+EVAL_TAG="${CELL}"
+[[ -n "${GTAG}" ]] && EVAL_TAG="${EVAL_TAG:+${EVAL_TAG}_}${GTAG}"
+if [[ -n "${EVAL_TAG}" ]]; then
+    EXP_DIR="${MAIN_EXP_DIR}/cells/${EVAL_TAG}"
+    POSTFIX="${POSTFIX}_${EVAL_TAG}"
 else
     EXP_DIR="${MAIN_EXP_DIR}"
 fi
@@ -113,6 +140,8 @@ echo "  EVAL_MODE  : ${EVAL_MODE}"
 echo "  PHASE      : ${PHASE}"
 echo "  NUM_IMAGES : ${NUM_IMAGES}"
 echo "  POSTFIX    : ${POSTFIX}"
+echo "  CELL       : ${CELL:-<none>}"
+echo "  GUIDANCE   : ${GUIDANCE_SCALE} (tag=${GTAG:-<none>})"
 echo "  EXP_DIR    : ${EXP_DIR}"
 echo "  EXP_LOG    : ${EXP_LOG}"
 echo "  master     : ${MASTER_ADDR}:${MASTER_PORT}"
@@ -183,6 +212,7 @@ srun --cpu-bind=none,v --accel-bind=g torchrun \
       ${AMP_ARG} \
       --weight_dtype "${WEIGHT_DTYPE}" \
       --postfix "${POSTFIX}" \
+      --guidance_scale "${GUIDANCE_SCALE}" \
       --base_label_dir "${BASE_CSV}" \
       --other_label_dir "${OTHER_CSV}" \
       --data_dir "${DATA_DIR}" \

@@ -52,16 +52,41 @@ def _build_records(csv_path: str, data_dir: str, source: str,
 
 
 def build_transforms(resolution: tuple[int, int, int],
-                     orientation_axcodes: str = "RAS") -> Compose:
-    return Compose([
-        LoadImaged(keys=["image"]),
-        EnsureChannelFirstd(keys=["image"]),
-        Orientationd(keys=["image"], axcodes=orientation_axcodes),
+                     orientation_axcodes: str = "RAS",
+                     npy: bool = False) -> Compose:
+    """Image pipeline → (1, *resolution) float32 in [0,1].
+
+    ``npy=True`` reads the preprocessed ``.npy`` cache (already skull-stripped,
+    canonical-orientation, [0,1]); it has no affine, so Orientationd is dropped
+    and the channel is force-added. ``npy=False`` reads NIfTI (real raw / VAE-
+    decoded generations). Both end with the SAME resize + percentile norm so a
+    predictor trained on ``.npy`` and evaluated on generated ``.nii.gz`` sees
+    comparable inputs (adherence is measured in generation space)."""
+    if npy:
+        load = [
+            LoadImaged(keys=["image"], reader="NumpyReader"),
+            EnsureChannelFirstd(keys=["image"], channel_dim="no_channel"),
+        ]
+    else:
+        load = [
+            LoadImaged(keys=["image"]),
+            EnsureChannelFirstd(keys=["image"]),
+            Orientationd(keys=["image"], axcodes=orientation_axcodes),
+        ]
+    return Compose(load + [
         Resized(keys=["image"], spatial_size=resolution, size_mode="all"),
         ScaleIntensityRangePercentilesd(keys=["image"], lower=0.5, upper=99.5,
                                         b_min=0.0, b_max=1.0, clip=True),
         EnsureTyped(keys=["image"], dtype="float32"),
     ])
+
+
+def paths_are_npy(records) -> bool:
+    """True if the (first) sample image path is a .npy cache file."""
+    for r in records:
+        p = r.image_path if hasattr(r, "image_path") else r.get("image", "")
+        return str(p).endswith(".npy")
+    return False
 
 
 def make_dataset(real_csv: str, data_dir: str,
@@ -88,7 +113,8 @@ def make_dataset(real_csv: str, data_dir: str,
     data = [{"image": r.image_path, "age": r.age, "source": r.source}
             for r in records]
     return CacheDataset(data=data,
-                        transform=build_transforms(resolution, orientation_axcodes),
+                        transform=build_transforms(resolution, orientation_axcodes,
+                                                   npy=paths_are_npy(records)),
                         cache_rate=cache_rate)
 
 

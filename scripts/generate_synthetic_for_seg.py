@@ -62,6 +62,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--conditioning_scale", type=float, default=1.0)
     p.add_argument("--copy_mask", action="store_true", default=True,
                    help="Copy the conditioning mask into the output dir as the seg pair.")
+    p.add_argument("--modality", default="T1",
+                   help="modality token for the generated tumor volumes.")
+    p.add_argument("--cohort", default="brats",
+                   help="cohort token (A-variant model); None → absent.")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--amp", action="store_true", default=True)
     p.add_argument("--dry_run", action="store_true")
@@ -142,6 +146,26 @@ def main() -> None:
     all_next_timesteps = torch.cat((all_timesteps[1:],
                                     torch.tensor([0], dtype=all_timesteps.dtype)))
 
+    # Metadata conditioning: every seg sample is a tumor volume, so the meta token
+    # is constant (modality, dx=tumor[, cohort]). The conditional pooled UNet
+    # requires meta_tensor; ControlNet adds the spatial mask on top.
+    cond_cfg = model_cfg.get("conditioning")
+    use_token_set = bool(cond_cfg) and bool(cond_cfg.get("enabled", False))
+    meta_tensor = None
+    if use_token_set:
+        from patches.token_set_encoder import encode_token_set
+        cond_dict = {"modality": args.modality, "dx": "tumor"}
+        if args.cohort:
+            cond_dict["cohort"] = args.cohort
+        ci, cv, pr = encode_token_set(cond_dict, cond_cfg["attributes"])
+        meta_tensor = {
+            "cond_cat": torch.tensor([ci], dtype=torch.long, device=device),
+            "cond_cont": torch.tensor([cv], dtype=torch.float32, device=device),
+            "cond_presence": torch.tensor([pr], dtype=torch.bool, device=device),
+        }
+    print(f"[cond] use_token_set={use_token_set} modality={args.modality} "
+          f"dx=tumor cohort={args.cohort}")
+
     for i, mi in enumerate(mask_indices):
         eid = f"synth_{i:06d}"
         vol_out = vol_dir / f"{eid}-t1n.nii.gz"
@@ -170,6 +194,7 @@ def main() -> None:
                                                 conditioning_scale=args.conditioning_scale)
                 model_out = unet(x=latent, timesteps=t_tensor,
                                  spacing_tensor=spacing_tensor,
+                                 meta_tensor=meta_tensor,
                                  down_block_additional_residuals=down_res,
                                  mid_block_additional_residual=mid_res)
                 latent, _ = noise_scheduler.step(model_out, t, latent, next_t,

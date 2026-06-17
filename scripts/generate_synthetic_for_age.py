@@ -35,6 +35,21 @@ def _normalize_age(age: float, age_min: float, age_max: float) -> float:
     return (age - age_min) / (age_max - age_min + 1e-12)
 
 
+def _build_meta(cond_dict, cond_cfg, use_token_set, device, norm_age):
+    """meta_tensor for one sample: token-set dict (cond_cat/cont/presence) when
+    conditioning is enabled, else the legacy 1-D scalar age. Mirrors
+    compute_metric.run_generation so train/inference conditioning match."""
+    if not use_token_set:
+        return torch.tensor([[norm_age]], dtype=torch.float16, device=device)
+    from patches.token_set_encoder import encode_token_set
+    ci, cv, pr = encode_token_set(cond_dict, cond_cfg["attributes"])
+    return {
+        "cond_cat": torch.tensor([ci], dtype=torch.long, device=device),
+        "cond_cont": torch.tensor([cv], dtype=torch.float32, device=device),
+        "cond_presence": torch.tensor([pr], dtype=torch.bool, device=device),
+    }
+
+
 def sample_age_distribution(real_csv: str, n: int, seed: int,
                             method: str = "stratified") -> np.ndarray:
     import pandas as pd
@@ -72,6 +87,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--num_inference_steps", type=int, default=1000)
     p.add_argument("--stochastic_scale", type=float, default=0.0)
     p.add_argument("--age_sample_method", choices=["stratified", "uniform"], default="stratified")
+    p.add_argument("--modality", default="T1",
+                   help="modality token for the generated volumes (token-set conditioning).")
+    p.add_argument("--cohort", default=None,
+                   help="optional cohort token (A-variant model); omitted → absent.")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--amp", action="store_true", default=True)
     p.add_argument("--dry_run", action="store_true",
@@ -147,6 +166,10 @@ def main() -> None:
     all_next_timesteps = torch.cat((all_timesteps[1:],
                                     torch.tensor([0], dtype=all_timesteps.dtype)))
 
+    cond_cfg = model_cfg.get("conditioning")
+    use_token_set = bool(cond_cfg) and bool(cond_cfg.get("enabled", False))
+    print(f"[cond] use_token_set={use_token_set} modality={args.modality} cohort={args.cohort}")
+
     for i, age in enumerate(ages):
         eid = f"synth_{i:06d}"
         out_path = vol_dir / f"{eid}.nii.gz"
@@ -154,7 +177,12 @@ def main() -> None:
             continue
         torch.manual_seed(args.seed + i)
         norm_age = _normalize_age(float(age), age_min, age_max)
-        meta_tensor = torch.tensor([[norm_age]], dtype=torch.float16, device=device)
+        # condition on (modality, age[, cohort]); sex/dx/cdrsb left absent so the
+        # model fills them (it was trained with per-token CFG drop → robust to absence).
+        cond_dict = {"modality": args.modality, "age": float(age)}
+        if args.cohort:
+            cond_dict["cohort"] = args.cohort
+        meta_tensor = _build_meta(cond_dict, cond_cfg, use_token_set, device, norm_age)
         latent = torch.randn((1, latent_channels, *latent_shape), device=device)
         with torch.no_grad(), autocast(dtype=torch.float16, enabled=args.amp):
             for t, next_t in zip(all_timesteps, all_next_timesteps):

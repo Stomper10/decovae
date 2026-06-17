@@ -30,10 +30,12 @@ import pandas as pd
 
 from .base import DatasetAdapter
 
-# Manifest columns emitted as conditioning tokens (severity == cdrsb). Cohort
-# and site are bookkeeping (sampling / FID stratification), NOT condition tokens.
+# Manifest columns emitted as conditioning tokens (severity == cdrsb). `cohort`
+# is also emitted (always present) so the A-variant (cohort-token ON) ablation
+# can condition on it; the B-variant model config simply omits it from its
+# attribute list, so the same cond sidecar serves both. `site` stays bookkeeping.
 _TOKEN_CONT = ("age", "cdrsb")           # continuous scalars
-_TOKEN_CAT = ("modality", "sex", "dx")   # categorical strings
+_TOKEN_CAT = ("modality", "sex", "dx")   # categorical strings (cohort added separately)
 
 
 def _num_or_none(v):
@@ -178,6 +180,9 @@ class PooledAdapter(DatasetAdapter):
         tokens: dict = {}
         for k in _TOKEN_CAT:
             tokens[k] = _str_or_none(row.get(k))
+        # cohort: always present; used as a token only by the A-variant model
+        # config (B omits it from its attribute list and ignores this key).
+        tokens["cohort"] = _str_or_none(row.get("cohort"))
         for k in _TOKEN_CONT:
             tokens[k] = _num_or_none(row.get(k))
         return tokens
