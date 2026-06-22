@@ -446,8 +446,25 @@ def main():
         print(f"[Paths] logs_dir  = {exp_paths['logs']}")
         print(f"[Paths] vae_ckpts = {weights_vae_dir}")
         if args.report_to:
-            wandb.init(project=args.wandb_project_vae, entity=args.wandb_entity,
-                       config=args, name=args.run_name)
+            # Persist a stable W&B run id in exp_dir so SLURM requeue resumes the
+            # SAME run instead of spawning a new one each restart. First launch
+            # lets W&B auto-generate the id (no wandb.util dependency) then saves
+            # run.id; every requeue reads it back and resumes. resume="allow" =
+            # resume if the id exists server-side, else start fresh under it.
+            # (On resume, the <checkpointing_steps overlap re-logged after the
+            # last ckpt is dropped by W&B as non-monotonic — a warning, not an
+            # error.) Empty/garbled file → treated as first launch.
+            run_id_file = os.path.join(exp_paths["exp"], "wandb_run_id.txt")
+            resume_id = None
+            if os.path.exists(run_id_file):
+                with open(run_id_file) as f:
+                    resume_id = f.read().strip() or None
+            run = wandb.init(project=args.wandb_project_vae, entity=args.wandb_entity,
+                             config=args, name=args.run_name,
+                             id=resume_id, resume="allow")
+            if resume_id is None:
+                with open(run_id_file, "w") as f:
+                    f.write(run.id)
 
     # ------------------------------------------------------------------
     # Data
@@ -796,6 +813,8 @@ def main():
                     # Reserved peak reflects the caching-allocator footprint (what actually
                     # drives OOM); allocated peak undercounts it. Log both for headroom sizing.
                     log_data["perf/peak_mem_reserved_gb"] = torch.cuda.max_memory_reserved(device) / 1e9
+                    print(f"[mem] step {step}: peak_reserved {log_data['perf/peak_mem_reserved_gb']:.1f} GB "
+                          f"(alloc {log_data['perf/peak_mem_gb']:.1f} GB), bs/gpu={args.batch_size}", flush=True)
                     torch.cuda.reset_peak_memory_stats(device)
                     wandb.log(log_data, step=step)
 
@@ -813,6 +832,12 @@ def main():
             num_val_batches_local = 0
             cell_recon_sum = defaultdict(float)   # per-cohort recon (val_batch_size=1)
             cell_recon_cnt = defaultdict(int)
+            # Global latent-std accumulators over the FULL valid set (all ranks).
+            # scale_factor에 쓰이는 z_mu의 전역 std는 한 볼륨이 아니라 valid 전체에서
+            # sum / sum-of-squares를 모아 계산해야 제대로 된 추정이 된다.
+            zmu_sum = torch.zeros((), device=device, dtype=torch.float64)
+            zmu_sumsq = torch.zeros((), device=device, dtype=torch.float64)
+            zmu_count = torch.zeros((), device=device, dtype=torch.float64)
 
             with torch.no_grad():
                 for vi, val_batch in enumerate(dataloader_val):
@@ -844,6 +869,10 @@ def main():
                     val_epoch_losses["p_loss"] += loss_perceptual(reconstruction.float(), val_images.float()).item()
                     val_epoch_losses["z_mu_mean"] += z_mu_val_f.mean().item()
                     val_epoch_losses["z_sigma_mean"] += z_sigma_val_f.mean().item()
+                    zmu_d = z_mu_val_f.double()
+                    zmu_sum += zmu_d.sum()
+                    zmu_sumsq += (zmu_d * zmu_d).sum()
+                    zmu_count += zmu_d.numel()
                     for k, v in aux_losses_val.items():
                         val_epoch_losses[k] += v.item()
                     num_val_batches_local += 1
@@ -857,6 +886,20 @@ def main():
             total_batches = val_metrics[-1].item()
             denom = total_batches if total_batches > 0 else 1.0
             reduced = {k: val_metrics[i].item() / denom for i, k in enumerate(ordered_keys)}
+
+            # Global z_mu std over the full valid set (DDP-reduced sum/sumsq/count).
+            # All ranks must call this collective.
+            zmu_stats = torch.stack([zmu_sum, zmu_sumsq, zmu_count])
+            dist.all_reduce(zmu_stats, op=dist.ReduceOp.SUM)
+            g_sum, g_sumsq, g_cnt = zmu_stats[0].item(), zmu_stats[1].item(), zmu_stats[2].item()
+            if g_cnt > 0:
+                g_mean = g_sum / g_cnt
+                g_var = max(g_sumsq / g_cnt - g_mean * g_mean, 1e-12)
+                global_latent_std = g_var ** 0.5
+                global_scale_factor = 1.0 / global_latent_std
+            else:
+                global_latent_std = float("nan")
+                global_scale_factor = float("nan")
 
             avg_recon_loss = reduced["recons_loss"]
             avg_kl_loss_v = reduced["kl_loss"]
@@ -892,7 +935,8 @@ def main():
 
             if rank == 0:
                 print(f"\nStep {step} Total Val Loss: {val_loss_g:.4f}, "
-                      f"z_mu: {avg_z_mu_mean_v:.4f}, z_sigma: {avg_z_sigma_mean_v:.4f}")
+                      f"z_mu: {avg_z_mu_mean_v:.4f}, z_sigma: {avg_z_sigma_mean_v:.4f}, "
+                      f"global_std: {global_latent_std:.4f}, scale_factor: {global_scale_factor:.4f}")
                 if args.report_to:
                     log_data = {
                         "valid/total_loss": val_loss_g,
@@ -906,9 +950,10 @@ def main():
                         log_data[f"valid/{k}"] = reduced[k]
                     for c, v in per_cell_recon.items():
                         log_data[f"valid/recon_by_cell/{c}"] = v
+                    # valid 전체에서 집계한 전역 std 기반 scale_factor (1-볼륨 추정 폐기).
+                    log_data["valid/global_latent_std"] = global_latent_std
+                    log_data["valid/scale_factor"] = global_scale_factor
                     if num_val_batches_local > 0:
-                        std = z_mu_val.detach().float().flatten().std().clamp(min=1e-8)
-                        log_data["valid/scale_factor"] = (1.0 / std).item()
                         center_loc = find_label_center_loc(val_images[0, 0, ...])
                         log_data["valid/original_image"] = prepare_image_for_logging(val_images[0], center_loc)
                         log_data["valid/reconstructed_image"] = prepare_image_for_logging(reconstruction[0], center_loc)
