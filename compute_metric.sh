@@ -45,6 +45,17 @@ fi
 # uncertainty; CPU on gathered features). 0 = point estimate. For generation-seed
 # variance instead, submit with different SEED and aggregate the per-run FIDs.
 : "${FID_BOOTSTRAP:=0}"
+# FID feature extractor swap (diagnostic): radimagenet_resnet50 (default, MAISI-faithful)
+# | imagenet_inception (2.5D ImageNet) | med3d (TRUE-3D MedicalNet, 3D-MedDiffusion's).
+# med3d needs MED3D_REPO (dir containing medicalnet_models/) + MED3D_WEIGHT (.pth).
+: "${FID_MODEL_NAME:=radimagenet_resnet50}"
+: "${MED3D_REPO:=}"
+: "${MED3D_WEIGHT:=}"
+# Central-slice / resampling knobs. DEFAULT 1.0 = all slices (ablation baseline, matches
+# all historical numbers). Pass FID_CENTER_SLICES_RATIO=0.4 explicitly for the MAISI-
+# matched / background-dilution probe arm (vary ONLY this vs 1.0 to attribute the cause).
+: "${FID_CENTER_SLICES_RATIO:=1.0}"
+: "${FID_RESAMPLING_SPACING:=1.0x1.0x1.0}"
 : "${POSTFIX:=30step}"
 : "${DATASET:=ukb_20252}"
 source "${SCRIPT_DIR}/scripts/resolve_dataset.sh"
@@ -224,6 +235,11 @@ srun --cpu-bind=none,v --accel-bind=g torchrun \
       --other_label_dir "${OTHER_CSV}" \
       --data_dir "${DATA_DIR}" \
       --feature_extractor_path "${FEATURE_EXTRACTOR_PATH}" \
+      --fid_model_name "${FID_MODEL_NAME}" \
+      --med3d_repo "${MED3D_REPO}" \
+      --med3d_weight "${MED3D_WEIGHT}" \
+      --fid_center_slices_ratio "${FID_CENTER_SLICES_RATIO}" \
+      --fid_resampling_spacing "${FID_RESAMPLING_SPACING}" \
       --save_volume \
       --save_real &
 wait

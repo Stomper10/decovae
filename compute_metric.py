@@ -115,9 +115,27 @@ def load_config():
     parser.add_argument("--weight_dtype", type=str, default="fp32")
 
     # FID phase
-    parser.add_argument("--fid_model_name", type=str, default="radimagenet_resnet50")
+    parser.add_argument("--fid_model_name", type=str, default="radimagenet_resnet50",
+                        choices=["radimagenet_resnet50", "imagenet_inception", "med3d"],
+                        help="FID feature extractor. radimagenet_resnet50 = 2.5D RadImageNet "
+                             "(MAISI-faithful, current). imagenet_inception = 2.5D torchvision "
+                             "InceptionV3 (ImageNet; MICCAI 2311.13717 reports better human-"
+                             "perception alignment than RadImageNet). med3d = TRUE-3D MedicalNet "
+                             "ResNet-10 (what 3D-MedDiffusion uses; whole-volume, single FID). "
+                             "The med3d path bypasses 2.5D slicing (see run_fid_3d).")
+    parser.add_argument("--med3d_repo", type=str, default=None,
+                        help="Path to the vendored MedicalNet package root (the dir that "
+                             "contains medicalnet_models/). Required for --fid_model_name med3d.")
+    parser.add_argument("--med3d_weight", type=str, default=None,
+                        help="Path to resnet_10_23dataset.pth for --fid_model_name med3d.")
     parser.add_argument("--fid_resampling_spacing", type=str, default="1.0x1.0x1.0")
-    parser.add_argument("--fid_center_slices_ratio", type=float, default=1.0)
+    parser.add_argument("--fid_center_slices_ratio", type=float, default=1.0,
+                        help="Central fraction of slices used per axis. DEFAULT 1.0 = all "
+                             "slices (matches all historical numbers; the ablation baseline). "
+                             "MAISI-official = 0.4 (excludes empty/background slices) — pass "
+                             "explicitly as the background-dilution probe / MAISI-matched arm. "
+                             "Keep default 1.0 so ratio is a clean controlled variable; decide "
+                             "0.4 adoption AFTER the probe, don't bake it into every eval.")
     parser.add_argument("--fid_padding", type=lambda s: str(s).lower() == "true", default=True)
     parser.add_argument("--fid_center_cropping", type=lambda s: str(s).lower() == "true", default=True)
     parser.add_argument("--fid_ignore_existing", type=lambda s: str(s).lower() == "true", default=True)
@@ -129,6 +147,13 @@ def load_config():
                              "gaps (e.g. SID/VAD vs MAISI ~1pt) are statistically "
                              "credible. 0 = point estimate only (current behavior). "
                              "Runs on CPU over already-extracted features (no GPU/regen).")
+    parser.add_argument("--fid_decompose", type=lambda s: str(s).lower() == "true", default=True,
+                        help="Also log the FID split into its mean-shift term "
+                             "||mu_r - mu_g||^2 (systematic/coherent bias, e.g. uniform "
+                             "blur) and covariance term tr(S_r + S_g - 2 sqrt(S_r S_g)) "
+                             "(distributional spread/diversity mismatch) per plane + avg. "
+                             "Additive log lines only; the FID value is unchanged. "
+                             "Sum == monai FIDMetric exactly (reuses its _cov/_sqrtm).")
 
     args = parser.parse_args()
 
@@ -555,19 +580,52 @@ def spatial_average(x, keepdim=True):
 
 
 def radimagenet_intensity_normalisation(volume, norm2d=False):
+    # Verbatim port of NV-Generate-CTMR/scripts/compute_fid_2-5d_ct.py: each
+    # volume (or 2D slice, if norm2d) is min-max normalised to [0,1] BEFORE the
+    # ImageNet-mean subtraction. On our inputs (percentile clip=True already maps
+    # each volume to [0,1]) the min-max is a numeric no-op, but we keep it verbatim
+    # so this function is byte-identical to the reference extractor normalisation.
     dim = len(volume.shape)
     if dim == 4 and norm2d:
+        max2d, _ = torch.max(volume, dim=2, keepdim=True)
+        max2d, _ = torch.max(max2d, dim=3, keepdim=True)
+        min2d, _ = torch.min(volume, dim=2, keepdim=True)
+        min2d, _ = torch.min(min2d, dim=3, keepdim=True)
+        volume = (volume - min2d) / (max2d - min2d + 1e-10)
         return subtract_mean(volume)
     elif dim == 4:
+        max3d = torch.max(volume)
+        min3d = torch.min(volume)
+        volume = (volume - min3d) / (max3d - min3d + 1e-10)
         return subtract_mean(volume)
     if dim == 5:
+        maxval = torch.max(volume)
+        minval = torch.min(volume)
+        volume = (volume - minval) / (maxval - minval + 1e-10)
         return subtract_mean(volume)
     return volume
 
 
+def inception_intensity_normalisation(images_2d):
+    # 2.5D ImageNet-InceptionV3 input prep: per-slice min-max -> [0,1], resize to
+    # 299x299 (inception's native), then map to [-1,1] (standard FID inception input).
+    # Grayscale-replicated 3ch, so no BGR/mean handling. Returns ready-to-forward tensor.
+    x = images_2d
+    mn = torch.amin(x, dim=(2, 3), keepdim=True)
+    mx = torch.amax(x, dim=(2, 3), keepdim=True)
+    x = (x - mn) / (mx - mn + 1e-10)
+    x = F.interpolate(x, size=(299, 299), mode="bilinear", align_corners=False)
+    return x * 2.0 - 1.0
+
+
 def get_features_2p5d(image, feature_network, center_slices=False,
                      center_slices_ratio=1.0, sample_every_k=1,
-                     xy_only=True, drop_empty=False, empty_threshold=-700):
+                     xy_only=True, drop_empty=False, empty_threshold=-700,
+                     feat_norm=None):
+    # feat_norm: per-slice normalisation applied just before feature_network.forward.
+    # Defaults to the RadImageNet normalisation (byte-identical to the validated path).
+    if feat_norm is None:
+        feat_norm = radimagenet_intensity_normalisation
     if image.shape[1] == 1:
         image = image.repeat(1, 3, 1, 1, 1)
     image = image[:, [2, 1, 0], ...]
@@ -584,7 +642,7 @@ def get_features_2p5d(image, feature_network, center_slices=False,
         mapping_index = drop_empty_slice(slices, empty_threshold) if drop_empty \
                         else [True] * len(slices)
         images_2d = torch.cat(slices, dim=0)
-        images_2d = radimagenet_intensity_normalisation(images_2d)
+        images_2d = feat_norm(images_2d)
         images_2d = images_2d[mapping_index]
         feat_xy = spatial_average(feature_network.forward(images_2d), keepdim=False)
         if xy_only:
@@ -600,7 +658,7 @@ def get_features_2p5d(image, feature_network, center_slices=False,
         mapping_index = drop_empty_slice(slices, empty_threshold) if drop_empty \
                         else [True] * len(slices)
         images_2d = torch.cat(slices, dim=0)
-        images_2d = radimagenet_intensity_normalisation(images_2d)
+        images_2d = feat_norm(images_2d)
         images_2d = images_2d[mapping_index]
         feat_yz = spatial_average(feature_network.forward(images_2d), keepdim=False)
 
@@ -614,7 +672,7 @@ def get_features_2p5d(image, feature_network, center_slices=False,
         mapping_index = drop_empty_slice(slices, empty_threshold) if drop_empty \
                         else [True] * len(slices)
         images_2d = torch.cat(slices, dim=0)
-        images_2d = radimagenet_intensity_normalisation(images_2d)
+        images_2d = feat_norm(images_2d)
         images_2d = images_2d[mapping_index]
         feat_zx = spatial_average(feature_network.forward(images_2d), keepdim=False)
 
@@ -626,7 +684,7 @@ def pad_to_max_size(tensor, max_size, padding_value=0.0):
     return F.pad(tensor, pad_size, "constant", padding_value)
 
 
-def load_feature_network(model_name, device, local_rank, weight_path=None):
+def load_feature_network(model_name, device, local_rank, weight_path=None, med3d_repo=None):
     if model_name == "radimagenet_resnet50":
         import torchvision
         feature_network = torchvision.models.resnet50(weights=None)
@@ -645,6 +703,47 @@ def load_feature_network(model_name, device, local_rank, weight_path=None):
         msg = feature_network.load_state_dict(new_state_dict, strict=False)
         if local_rank == 0:
             logger.info(f"Weights loaded. (Missing keys expected due to notop): {msg}")
+    elif model_name == "imagenet_inception":
+        # 2.5D ImageNet InceptionV3 (fc->Identity => 2048-d pool3 features). Standard
+        # ImageNet-FID backbone; MICCAI 2311.13717 finds ImageNet extractors align
+        # with human perception better than RadImageNet. transform_input=False since
+        # inception_intensity_normalisation already maps slices to [-1,1] @ 299x299.
+        import torchvision
+        try:
+            weights = torchvision.models.Inception_V3_Weights.IMAGENET1K_V1
+            feature_network = torchvision.models.inception_v3(weights=weights, aux_logits=True)
+        except Exception:
+            feature_network = torchvision.models.inception_v3(pretrained=True, aux_logits=True)
+        feature_network.transform_input = False
+        feature_network.fc = nn.Identity()
+        feature_network.AuxLogits = None       # unused in eval; drop to avoid aux path
+        if local_rank == 0:
+            logger.info("Loaded torchvision InceptionV3 (ImageNet, fc=Identity, 2048-d).")
+    elif model_name == "med3d":
+        # TRUE-3D MedicalNet ResNet-10 (23-dataset pretrain) = the extractor 3D-Med-
+        # Diffusion evaluates with. Whole-volume 1-channel input; forward returns the
+        # layer4 feature map (512ch), GAP'd to 512-d in get_features_3d. Loaded from the
+        # vendored warvito/MedicalNet-models package (see external/3d_meddiff).
+        if not weight_path:
+            raise ValueError("med3d requires --med3d_weight (resnet_10_23dataset.pth).")
+        if med3d_repo and med3d_repo not in sys.path:
+            sys.path.insert(0, med3d_repo)
+        # The vendored medicalnet resnet.py does `import gdown` at module load (only for
+        # its download helper, which we bypass via local weights). Stub it if absent.
+        if "gdown" not in sys.modules:
+            try:
+                import gdown  # noqa: F401
+            except Exception:
+                import types
+                sys.modules["gdown"] = types.ModuleType("gdown")
+        from medicalnet_models.models.resnet import ResNet, BasicBlock
+        feature_network = ResNet(BasicBlock, [1, 1, 1, 1])   # resnet10
+        sd = torch.load(weight_path, map_location="cpu")
+        sd = sd.get("state_dict", sd)
+        sd = {k.replace("module.", ""): v for k, v in sd.items()}
+        msg = feature_network.load_state_dict(sd, strict=False)
+        if local_rank == 0:
+            logger.info(f"Loaded MedicalNet ResNet-10 (med3d). load msg: {msg}")
     else:
         import torchvision
         feature_network = torchvision.models.squeezenet1_1(pretrained=True)
@@ -681,7 +780,7 @@ def build_fid_transforms(target_shape_tuple, rs_spacing_tuple,
 
 def _extract_features(loader, dataset_root, output_root, feature_network, device,
                       enable_center_slices, center_slices_ratio_final,
-                      ignore_existing, label, local_rank, num_files):
+                      ignore_existing, label, local_rank, num_files, feat_norm=None):
     feats_xy, feats_yz, feats_zx = [], [], []
     for idx, batch_data in enumerate(loader, start=1):
         img = batch_data["image"].to(device)
@@ -701,6 +800,7 @@ def _extract_features(loader, dataset_root, output_root, feature_network, device
                 center_slices=enable_center_slices,
                 center_slices_ratio=center_slices_ratio_final,
                 xy_only=False,
+                feat_norm=feat_norm,
             )
             logger.info(f"feats shapes: {feats[0].shape}, {feats[1].shape}, {feats[2].shape}")
             feats = tuple(f.cpu() for f in feats)
@@ -713,7 +813,134 @@ def _extract_features(loader, dataset_root, output_root, feature_network, device
     return torch.vstack(feats_xy), torch.vstack(feats_yz), torch.vstack(feats_zx)
 
 
+def frechet_terms(y_pred, y):
+    """FID split into its two additive components, byte-matching monai FIDMetric.
+
+    FID = ||mu_pred - mu_real||^2  +  tr(S_pred + S_real - 2 sqrt(S_pred S_real))
+          \_____ mean-shift term ____/  \_________ covariance term _____________/
+
+    mean-term: coherent/systematic bias — every sample shifted the same way in
+      feature space (e.g. uniform blur attenuating high-freq texture). Survives
+      averaging over the set; this is what per-sample PSNR/SSIM/LPIPS under-weight.
+    cov-term : distributional spread / diversity mismatch (mode coverage).
+
+    Reuses monai's own _cov/_sqrtm and singular/complex handling so the returned
+    total is identical to FIDMetric()(y_pred, y). Returns (total, mean_term, cov_term).
+    """
+    from monai.metrics.fid import _cov, _sqrtm
+    y = y.double(); y_pred = y_pred.double()
+    mu_x = torch.mean(y_pred, dim=0); sigma_x = _cov(y_pred, rowvar=False)
+    mu_y = torch.mean(y, dim=0);      sigma_y = _cov(y, rowvar=False)
+    diff = mu_x - mu_y
+    covmean = _sqrtm(sigma_x.mm(sigma_y))
+    if not torch.isfinite(covmean).all():
+        offset = torch.eye(sigma_x.size(0), device=mu_x.device, dtype=mu_x.dtype) * 1e-6
+        covmean = _sqrtm((sigma_x + offset).mm(sigma_y + offset))
+    if torch.is_complex(covmean):
+        covmean = covmean.real
+    mean_term = float(diff.dot(diff))
+    cov_term = float(torch.trace(sigma_x) + torch.trace(sigma_y) - 2 * torch.trace(covmean))
+    return mean_term + cov_term, mean_term, cov_term
+
+
+def get_features_3d(volume, feature_network):
+    # med3d whole-volume features. volume: (B,1,H,W,D). Per-volume z-score (matches
+    # 3D-MedDiffusion's mednet_norm), forward -> (B,512,h,w,d), GAP -> (B,512).
+    x = volume
+    if x.shape[1] != 1:
+        x = x[:, :1, ...]
+    x = (x - x.mean()) / (x.std() + 1e-8)
+    with torch.no_grad():
+        feat = feature_network(x)               # (B, 512, h, w, d)
+    return feat.mean(dim=[2, 3, 4])             # GAP -> (B, 512)
+
+
+def run_fid_3d(args, paths, device, local_rank, world_size):
+    # TRUE-3D FID with MedicalNet ResNet-10 (the 3D-MedDiffusion extractor). One feature
+    # vector per whole volume -> a single FID (no XY/YZ/ZX planes). Reuses the same
+    # filelists / transforms / DDP gather as run_fid.
+    if local_rank == 0:
+        logger.info("FID model              : med3d (MedicalNet ResNet-10, TRUE-3D)")
+        logger.info(f"FID target shape       : {args.fid_target_shape}")
+        logger.info(f"med3d weight           : {args.med3d_weight}")
+        logger.info(f"med3d repo             : {args.med3d_repo}")
+    feature_network = load_feature_network("med3d", device, local_rank,
+                                           weight_path=args.med3d_weight,
+                                           med3d_repo=args.med3d_repo)
+    target_shape_tuple = tuple(int(x) for x in args.fid_target_shape.split("x"))
+    enable_resampling = args.fid_resampling_spacing is not None
+    rs_spacing_tuple = (tuple(float(x) for x in args.fid_resampling_spacing.split("x"))
+                        if enable_resampling else (1.0, 1.0, 1.0))
+    dataset_root = paths["volumes_dir"]
+
+    if local_rank == 0:
+        synth_glob = ("recon_*.nii.gz" if args.eval_mode == "real_vs_recon"
+                      else f"gen_*_{args.postfix}.nii.gz")
+        for fl, pattern in ((paths["real_filelist"], "base_*.nii.gz"),
+                            (paths["synth_filelist"], synth_glob)):
+            if fl and not os.path.isfile(fl):
+                names = sorted(p.name for p in Path(dataset_root).glob(pattern))
+                with open(fl, "w") as f:
+                    f.write("\n".join(names) + ("\n" if names else ""))
+    if dist.is_initialized():
+        dist.barrier()
+
+    with open(paths["real_filelist"]) as rf:
+        real_lines = sorted(l.strip() for l in rf.readlines())[:args.num_images]
+    with open(paths["synth_filelist"]) as sf:
+        synth_lines = sorted(l.strip() for l in sf.readlines())[:args.num_images]
+    real_fn = [{"image": os.path.join(dataset_root, f)} for f in real_lines]
+    synth_fn = [{"image": os.path.join(dataset_root, f)} for f in synth_lines]
+    part = lambda d: monai.data.partition_dataset(
+        data=d, shuffle=False, num_partitions=world_size, even_divisible=False)[local_rank]
+    real_fn, synth_fn = part(real_fn), part(synth_fn)
+
+    transforms = build_fid_transforms(target_shape_tuple, rs_spacing_tuple,
+                                      enable_resampling, args.fid_padding,
+                                      args.fid_center_cropping,
+                                      args.orientation_axcodes,
+                                      args.intensity_norm_metric)
+
+    def _feats(fnlist, label):
+        loader = monai.data.DataLoader(
+            monai.data.Dataset(data=fnlist, transform=transforms),
+            num_workers=6, batch_size=1, shuffle=False)
+        out = []
+        for idx, batch in enumerate(loader, start=1):
+            img = batch["image"].to(device)
+            out.append(get_features_3d(img.as_tensor(), feature_network).cpu())
+            logger.info(f"[Rank {local_rank}] med3d {label} {idx}/{len(fnlist)}")
+        return torch.vstack(out) if out else torch.zeros(0, 512)
+
+    real_f = _feats(real_fn, "Real")
+    synth_f = _feats(synth_fn, "Synth")
+
+    def _gather(ft):
+        if not dist.is_initialized():
+            return ft
+        ls = torch.tensor([ft.shape[0]], dtype=torch.int64, device=device)
+        rs = [torch.zeros(1, dtype=torch.int64, device=device) for _ in range(world_size)]
+        dist.all_gather(rs, ls)
+        maxn = max(int(x.item()) for x in rs)
+        pad = pad_to_max_size(ft.to(device), maxn)
+        gl = [torch.empty_like(pad) for _ in range(world_size)]
+        dist.all_gather(gl, pad)
+        return torch.vstack([gl[i][:int(rs[i].item())].cpu() for i in range(world_size)])
+
+    real_all, synth_all = _gather(real_f), _gather(synth_f)
+    if local_rank == 0:
+        logger.info(f"[med3d] real {tuple(real_all.shape)} synth {tuple(synth_all.shape)}")
+        val = float(FIDMetric()(synth_all, real_all))
+        logger.info(f"FID (med3d 3D): {val}")
+        logger.info(f"FID Avg: {val}")   # harvester-compatible ('FID Avg:' line)
+
+
 def run_fid(args, paths, device, local_rank, world_size):
+    # med3d is a TRUE-3D extractor (whole-volume features, single FID) — entirely
+    # different aggregation from the 2.5D XY/YZ/ZX path, so it dispatches out here.
+    if args.fid_model_name == "med3d":
+        return run_fid_3d(args, paths, device, local_rank, world_size)
+
     enable_center_slices = args.fid_center_slices_ratio is not None
     enable_resampling = args.fid_resampling_spacing is not None
 
@@ -728,6 +955,11 @@ def run_fid(args, paths, device, local_rank, world_size):
 
     feature_network = load_feature_network(args.fid_model_name, device, local_rank,
                                            weight_path=args.feature_extractor_path)
+    # Extractor-specific per-slice normalisation. RadImageNet keeps the validated
+    # default; Inception needs [-1,1] @ 299x299.
+    feat_norm = (inception_intensity_normalisation
+                 if args.fid_model_name == "imagenet_inception"
+                 else radimagenet_intensity_normalisation)
 
     target_shape_tuple = tuple(int(x) for x in args.fid_target_shape.split("x"))
     if enable_resampling:
@@ -796,13 +1028,15 @@ def run_fid(args, paths, device, local_rank, world_size):
     real_xy, real_yz, real_zx = _extract_features(
         real_loader, dataset_root, output_root_real, feature_network, device,
         enable_center_slices, center_slices_ratio_final,
-        args.fid_ignore_existing, "Real data", local_rank, len(real_filenames))
+        args.fid_ignore_existing, "Real data", local_rank, len(real_filenames),
+        feat_norm=feat_norm)
     logger.info(f"Real feature shapes: {real_xy.shape}, {real_yz.shape}, {real_zx.shape}")
 
     synth_xy, synth_yz, synth_zx = _extract_features(
         synth_loader, dataset_root, output_root_synth, feature_network, device,
         enable_center_slices, center_slices_ratio_final,
-        args.fid_ignore_existing, "Synth data", local_rank, len(synth_filenames))
+        args.fid_ignore_existing, "Synth data", local_rank, len(synth_filenames),
+        feat_norm=feat_norm)
     logger.info(f"Synth feature shapes: {synth_xy.shape}, {synth_yz.shape}, {synth_zx.shape}")
 
     del feature_network
@@ -857,6 +1091,21 @@ def run_fid(args, paths, device, local_rank, world_size):
         logger.info(f"FID YZ : {fid_yz}")
         logger.info(f"FID ZX : {fid_zx}")
         logger.info(f"FID Avg: {(fid_xy + fid_yz + fid_zx) / 3.0}")
+
+        # ---- FID term decomposition (mean-shift vs covariance) ----
+        # Diagnoses WHY rFID is high: a large mean-term = coherent systematic bias
+        # (e.g. uniform blur / high-freq loss — the "paired metrics fine, rFID high"
+        # fingerprint), a large cov-term = diversity/spread mismatch. Additive log
+        # only; sum matches the FID values above (reuses monai _cov/_sqrtm).
+        if getattr(args, "fid_decompose", True):
+            m_sum = c_sum = t_sum = 0.0
+            for name, (s, r) in (("XY", (sxy, rxy)), ("YZ", (syz, ryz)), ("ZX", (szx, rzx))):
+                tot, m_t, c_t = frechet_terms(s, r)
+                m_sum += m_t; c_sum += c_t; t_sum += tot
+                logger.info(f"FID {name} decomp: total {tot:.4f} = mean-term {m_t:.4f} "
+                            f"({100*m_t/tot:.1f}%) + cov-term {c_t:.4f} ({100*c_t/tot:.1f}%)")
+            logger.info(f"FID Avg decomp: total {t_sum/3:.4f} = mean-term {m_sum/3:.4f} "
+                        f"({100*m_sum/t_sum:.1f}%) + cov-term {c_sum/3:.4f} ({100*c_sum/t_sum:.1f}%)")
 
         # ---- bootstrap standard error (finite-sample FID uncertainty) ----
         # Resample synth + real feature rows (with replacement) B times → bootstrap
