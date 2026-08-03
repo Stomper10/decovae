@@ -116,18 +116,34 @@ def load_config():
 
     # FID phase
     parser.add_argument("--fid_model_name", type=str, default="radimagenet_resnet50",
-                        choices=["radimagenet_resnet50", "imagenet_inception", "med3d"],
+                        choices=["radimagenet_resnet50", "imagenet_inception",
+                                 "imagenet_swav", "dinov2", "med3d"],
                         help="FID feature extractor. radimagenet_resnet50 = 2.5D RadImageNet "
                              "(MAISI-faithful, current). imagenet_inception = 2.5D torchvision "
                              "InceptionV3 (ImageNet; MICCAI 2311.13717 reports better human-"
-                             "perception alignment than RadImageNet). med3d = TRUE-3D MedicalNet "
-                             "ResNet-10 (what 3D-MedDiffusion uses; whole-volume, single FID). "
-                             "The med3d path bypasses 2.5D slicing (see run_fid_3d).")
+                             "perception alignment than RadImageNet). imagenet_swav = 2.5D "
+                             "ImageNet-SwAV ResNet50 backbone (Woodland 2311.13717's best "
+                             "human-aligned medical extractor; 2048-d). dinov2 = 2.5D FD-DINOv2 "
+                             "ViT (Stein NeurIPS'23 general-domain standard; CLS embedding). "
+                             "med3d = TRUE-3D MedicalNet ResNet-10 (what 3D-MedDiffusion uses; "
+                             "whole-volume, single FID). med3d bypasses 2.5D slicing (run_fid_3d).")
     parser.add_argument("--med3d_repo", type=str, default=None,
                         help="Path to the vendored MedicalNet package root (the dir that "
                              "contains medicalnet_models/). Required for --fid_model_name med3d.")
     parser.add_argument("--med3d_weight", type=str, default=None,
                         help="Path to resnet_10_23dataset.pth for --fid_model_name med3d.")
+    parser.add_argument("--swav_weight", type=str, default=None,
+                        help="Path to a SwAV ResNet50 checkpoint (e.g. swav_800ep_pretrain."
+                             "pth.tar). Required for --fid_model_name imagenet_swav.")
+    parser.add_argument("--dino_repo", type=str, default=None,
+                        help="Path to a LOCAL clone of facebookresearch/dinov2 (loaded via "
+                             "torch.hub source='local'). Required for --fid_model_name dinov2.")
+    parser.add_argument("--dino_weight", type=str, default=None,
+                        help="Path to DINOv2 backbone weights (.pth) for --fid_model_name "
+                             "dinov2. If omitted the hub arch is built without pretrained weights.")
+    parser.add_argument("--dino_arch", type=str, default="dinov2_vitl14",
+                        help="DINOv2 hub entrypoint (default dinov2_vitl14 -> 1024-d CLS, the "
+                             "FD-DINOv2 default). Others: dinov2_vitb14 (768), dinov2_vits14 (384).")
     parser.add_argument("--fid_resampling_spacing", type=str, default="1.0x1.0x1.0")
     parser.add_argument("--fid_center_slices_ratio", type=float, default=1.0,
                         help="Central fraction of slices used per axis. DEFAULT 1.0 = all "
@@ -618,6 +634,26 @@ def inception_intensity_normalisation(images_2d):
     return x * 2.0 - 1.0
 
 
+_IMAGENET_MEAN = (0.485, 0.456, 0.406)
+_IMAGENET_STD = (0.229, 0.224, 0.225)
+
+
+def imagenet_rgb_normalisation(images_2d, size=224):
+    # 2.5D ImageNet-RGB input prep shared by SwAV (ResNet50) and DINOv2 (ViT/14):
+    # per-slice min-max -> [0,1], resize to size x size (224 = 16*14, valid for the
+    # /14 patch grid), then standard ImageNet mean/std standardisation. Slices arrive
+    # grayscale-replicated to 3 identical channels, so the per-channel mean/std is the
+    # usual grayscale->RGB FID handling.
+    x = images_2d
+    mn = torch.amin(x, dim=(2, 3), keepdim=True)
+    mx = torch.amax(x, dim=(2, 3), keepdim=True)
+    x = (x - mn) / (mx - mn + 1e-10)
+    x = F.interpolate(x, size=(size, size), mode="bilinear", align_corners=False)
+    mean = torch.tensor(_IMAGENET_MEAN, device=x.device, dtype=x.dtype).view(1, 3, 1, 1)
+    std = torch.tensor(_IMAGENET_STD, device=x.device, dtype=x.dtype).view(1, 3, 1, 1)
+    return (x - mean) / std
+
+
 def get_features_2p5d(image, feature_network, center_slices=False,
                      center_slices_ratio=1.0, sample_every_k=1,
                      xy_only=True, drop_empty=False, empty_threshold=-700,
@@ -684,7 +720,8 @@ def pad_to_max_size(tensor, max_size, padding_value=0.0):
     return F.pad(tensor, pad_size, "constant", padding_value)
 
 
-def load_feature_network(model_name, device, local_rank, weight_path=None, med3d_repo=None):
+def load_feature_network(model_name, device, local_rank, weight_path=None, med3d_repo=None,
+                         dino_repo=None, dino_arch="dinov2_vitl14"):
     if model_name == "radimagenet_resnet50":
         import torchvision
         feature_network = torchvision.models.resnet50(weights=None)
@@ -719,6 +756,49 @@ def load_feature_network(model_name, device, local_rank, weight_path=None, med3d
         feature_network.AuxLogits = None       # unused in eval; drop to avoid aux path
         if local_rank == 0:
             logger.info("Loaded torchvision InceptionV3 (ImageNet, fc=Identity, 2048-d).")
+    elif model_name == "imagenet_swav":
+        # ImageNet self-supervised SwAV, ResNet50 backbone -> 2048-d (fc=Identity).
+        # Woodland arXiv:2311.13717 finds ImageNet-SSL extractors (SwAV best) align with
+        # human perception for medical FID. Weights = facebookresearch/swav resnet50
+        # checkpoint; projection-head / prototype keys are ignored (strict=False loads
+        # only the conv backbone, which shares torchvision resnet50 key names).
+        import torchvision
+        feature_network = torchvision.models.resnet50(weights=None)
+        feature_network.fc = nn.Identity()
+        if not weight_path:
+            raise ValueError("imagenet_swav requires --swav_weight (SwAV resnet50 .pth.tar).")
+        if not os.path.exists(weight_path):
+            raise FileNotFoundError(f"SwAV weight not found at: {weight_path}")
+        sd = torch.load(weight_path, map_location="cpu")
+        sd = sd.get("state_dict", sd) if isinstance(sd, dict) else sd
+        sd = {k.replace("module.", ""): v for k, v in sd.items()}
+        sd = {k: v for k, v in sd.items()
+              if not (k.startswith("projection_head") or k.startswith("prototypes"))}
+        msg = feature_network.load_state_dict(sd, strict=False)
+        if local_rank == 0:
+            logger.info(f"Loaded SwAV ResNet50 backbone (imagenet_swav, fc=Identity, "
+                        f"2048-d). load msg: {msg}")
+    elif model_name == "dinov2":
+        # FD-DINOv2 (Stein et al. NeurIPS'23): DINOv2 features give the most human-
+        # aligned FID and are now the general-domain standard. ViT-L/14 -> 1024-d CLS
+        # (model(x) returns x_norm_clstoken). Loaded from a LOCAL clone of
+        # facebookresearch/dinov2 (torch.hub source='local') so GSDS needs no internet;
+        # weights via --dino_weight.
+        if not dino_repo:
+            raise ValueError("dinov2 requires --dino_repo (local facebookresearch/dinov2 clone).")
+        feature_network = torch.hub.load(dino_repo, dino_arch, source="local", pretrained=False)
+        if weight_path:
+            if not os.path.exists(weight_path):
+                raise FileNotFoundError(f"DINOv2 weight not found at: {weight_path}")
+            sd = torch.load(weight_path, map_location="cpu")
+            sd = sd.get("state_dict", sd) if isinstance(sd, dict) else sd
+            sd = {k.replace("module.", ""): v for k, v in sd.items()}
+            msg = feature_network.load_state_dict(sd, strict=False)
+            if local_rank == 0:
+                logger.info(f"Loaded DINOv2 {dino_arch} weights. load msg: {msg}")
+        elif local_rank == 0:
+            logger.info(f"DINOv2 {dino_arch} built WITHOUT pretrained weights "
+                        f"(--dino_weight not given).")
     elif model_name == "med3d":
         # TRUE-3D MedicalNet ResNet-10 (23-dataset pretrain) = the extractor 3D-Med-
         # Diffusion evaluates with. Whole-volume 1-channel input; forward returns the
@@ -953,13 +1033,25 @@ def run_fid(args, paths, device, local_rank, world_size):
         logger.info(f"enable_resampling      : {enable_resampling} (spacing={args.fid_resampling_spacing})")
         logger.info(f"ignore_existing        : {args.fid_ignore_existing}")
 
-    feature_network = load_feature_network(args.fid_model_name, device, local_rank,
-                                           weight_path=args.feature_extractor_path)
+    # Each 2.5D extractor pulls its weights from its own arg.
+    weight_by_model = {
+        "radimagenet_resnet50": args.feature_extractor_path,
+        "imagenet_inception": None,          # torchvision downloads / caches ImageNet weights
+        "imagenet_swav": args.swav_weight,
+        "dinov2": args.dino_weight,
+    }
+    feature_network = load_feature_network(
+        args.fid_model_name, device, local_rank,
+        weight_path=weight_by_model.get(args.fid_model_name, args.feature_extractor_path),
+        dino_repo=args.dino_repo, dino_arch=args.dino_arch)
     # Extractor-specific per-slice normalisation. RadImageNet keeps the validated
-    # default; Inception needs [-1,1] @ 299x299.
-    feat_norm = (inception_intensity_normalisation
-                 if args.fid_model_name == "imagenet_inception"
-                 else radimagenet_intensity_normalisation)
+    # default; Inception needs [-1,1] @ 299x299; SwAV/DINOv2 need ImageNet mean/std @ 224.
+    if args.fid_model_name == "imagenet_inception":
+        feat_norm = inception_intensity_normalisation
+    elif args.fid_model_name in ("imagenet_swav", "dinov2"):
+        feat_norm = imagenet_rgb_normalisation
+    else:
+        feat_norm = radimagenet_intensity_normalisation
 
     target_shape_tuple = tuple(int(x) for x in args.fid_target_shape.split("x"))
     if enable_resampling:
@@ -1182,7 +1274,8 @@ def main():
         logger.info("  -- FID params --")
         for k in ("fid_model_name", "fid_resampling_spacing",
                   "fid_center_slices_ratio", "fid_padding",
-                  "fid_center_cropping", "fid_ignore_existing"):
+                  "fid_center_cropping", "fid_ignore_existing",
+                  "swav_weight", "dino_repo", "dino_weight", "dino_arch"):
             if hasattr(args, k):
                 logger.info(f"    {k:22s}: {getattr(args, k)}")
         logger.info("  -- paths --")

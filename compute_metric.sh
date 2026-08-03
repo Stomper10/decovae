@@ -46,11 +46,19 @@ fi
 # variance instead, submit with different SEED and aggregate the per-run FIDs.
 : "${FID_BOOTSTRAP:=0}"
 # FID feature extractor swap (diagnostic): radimagenet_resnet50 (default, MAISI-faithful)
-# | imagenet_inception (2.5D ImageNet) | med3d (TRUE-3D MedicalNet, 3D-MedDiffusion's).
-# med3d needs MED3D_REPO (dir containing medicalnet_models/) + MED3D_WEIGHT (.pth).
+# | imagenet_inception (2.5D ImageNet) | imagenet_swav (2.5D ImageNet-SwAV ResNet50,
+# Woodland's) | dinov2 (2.5D FD-DINOv2 ViT) | med3d (TRUE-3D MedicalNet, 3D-MedDiffusion's).
+# med3d needs MED3D_REPO (dir with medicalnet_models/) + MED3D_WEIGHT (.pth).
+# imagenet_swav needs SWAV_WEIGHT (swav resnet50 .pth.tar).
+# dinov2 needs DINO_REPO (local facebookresearch/dinov2 clone) + DINO_WEIGHT (.pth);
+#   DINO_ARCH selects the hub entrypoint (default dinov2_vitl14 -> 1024-d CLS).
 : "${FID_MODEL_NAME:=radimagenet_resnet50}"
 : "${MED3D_REPO:=}"
 : "${MED3D_WEIGHT:=}"
+: "${SWAV_WEIGHT:=}"
+: "${DINO_REPO:=}"
+: "${DINO_WEIGHT:=}"
+: "${DINO_ARCH:=dinov2_vitl14}"
 # Central-slice / resampling knobs. DEFAULT 1.0 = all slices (ablation baseline, matches
 # all historical numbers). Pass FID_CENTER_SLICES_RATIO=0.4 explicitly for the MAISI-
 # matched / background-dilution probe arm (vary ONLY this vs 1.0 to attribute the cause).
@@ -238,6 +246,10 @@ srun --cpu-bind=none,v --accel-bind=g torchrun \
       --fid_model_name "${FID_MODEL_NAME}" \
       --med3d_repo "${MED3D_REPO}" \
       --med3d_weight "${MED3D_WEIGHT}" \
+      --swav_weight "${SWAV_WEIGHT}" \
+      --dino_repo "${DINO_REPO}" \
+      --dino_weight "${DINO_WEIGHT}" \
+      --dino_arch "${DINO_ARCH}" \
       --fid_center_slices_ratio "${FID_CENTER_SLICES_RATIO}" \
       --fid_resampling_spacing "${FID_RESAMPLING_SPACING}" \
       --save_volume \
