@@ -144,6 +144,15 @@ def load_config():
     parser.add_argument("--dino_arch", type=str, default="dinov2_vitl14",
                         help="DINOv2 hub entrypoint (default dinov2_vitl14 -> 1024-d CLS, the "
                              "FD-DINOv2 default). Others: dinov2_vitb14 (768), dinov2_vits14 (384).")
+    parser.add_argument("--fid_woodland", action="store_true",
+                        help="Woodland-exact 2D FID protocol: axial-only (single plane) + "
+                             "per-slice content-fraction filter (--fid_content_frac) + 256^2 "
+                             "center-pad (no resize). Overrides center-slices; XY=YZ=ZX=Avg = "
+                             "the single axial value. Intended for imagenet_swav (Woodland's "
+                             "best medical extractor); matches fid-med-eval prepare_MSDbt.py.")
+    parser.add_argument("--fid_content_frac", type=float, default=0.15,
+                        help="Woodland content-fraction threshold: keep an axial slice only if "
+                             "its nonzero (foreground) pixel fraction exceeds this (default 0.15).")
     parser.add_argument("--fid_resampling_spacing", type=str, default="1.0x1.0x1.0")
     parser.add_argument("--fid_center_slices_ratio", type=float, default=1.0,
                         help="Central fraction of slices used per axis. DEFAULT 1.0 = all "
@@ -578,6 +587,24 @@ def drop_empty_slice(slices, empty_threshold):
     return outputs
 
 
+def content_frac_mask(slices, content_frac):
+    # Woodland fid-med-eval slice filter (prepare_MSDbt.py): keep a slice only if the
+    # fraction of foreground (nonzero) pixels EXCEEDS content_frac (default 0.15).
+    # Slices are grayscale-replicated 3ch (post skull-strip bg is exactly 0), so
+    # channel 0 gives the content fraction. B=1 here (matches drop_empty_slice: one
+    # bool per slice position, applied after torch.cat(dim=0)).
+    outputs, n_drop = [], 0
+    for s in slices:
+        frac = (s[:, 0] > 0).float().mean().item()
+        if frac > content_frac:
+            outputs.append(True)
+        else:
+            outputs.append(False); n_drop += 1
+    logger.info(f"Woodland content<={content_frac} drop rate "
+                f"{round((n_drop/len(slices))*100,1)}% (kept {len(slices)-n_drop}/{len(slices)})")
+    return outputs
+
+
 def subtract_mean(x):
     mean = [0.406, 0.456, 0.485]
     x[:, 0, ...] -= mean[0]
@@ -654,12 +681,52 @@ def imagenet_rgb_normalisation(images_2d, size=224):
     return (x - mean) / std
 
 
+def woodland_rgb_normalisation(images_2d, size=256):
+    # Woodland fid-med-eval input prep: per-slice min-max -> [0,1], center pad (or
+    # crop) to size x size (256, NO resize -> preserves native scale), then ImageNet
+    # mean/std. Feeds a ResNet backbone (adaptive-pooled, any HxW ok). Pairs with the
+    # content_frac_mask axial-only path for a Woodland-exact SwAV FID.
+    x = images_2d
+    mn = torch.amin(x, dim=(2, 3), keepdim=True)
+    mx = torch.amax(x, dim=(2, 3), keepdim=True)
+    x = (x - mn) / (mx - mn + 1e-10)
+    H, W = x.shape[-2], x.shape[-1]
+
+    def _fit(v, target):
+        if v == target:
+            return 0, 0, 0, 0          # pad_lo, pad_hi, crop_lo, crop_hi
+        if v < target:
+            a = (target - v) // 2
+            return a, target - v - a, 0, 0
+        a = (v - target) // 2
+        return 0, 0, a, v - target - a
+
+    ph_a, ph_b, ch_a, ch_b = _fit(H, size)
+    pw_a, pw_b, cw_a, cw_b = _fit(W, size)
+    if ch_a or ch_b:
+        x = x[..., ch_a:H - ch_b, :]
+    if cw_a or cw_b:
+        x = x[..., cw_a:W - cw_b]
+    x = F.pad(x, (pw_a, pw_b, ph_a, ph_b), mode="constant", value=0.0)
+    mean = torch.tensor(_IMAGENET_MEAN, device=x.device, dtype=x.dtype).view(1, 3, 1, 1)
+    std = torch.tensor(_IMAGENET_STD, device=x.device, dtype=x.dtype).view(1, 3, 1, 1)
+    return (x - mean) / std
+
+
 def get_features_2p5d(image, feature_network, center_slices=False,
                      center_slices_ratio=1.0, sample_every_k=1,
                      xy_only=True, drop_empty=False, empty_threshold=-700,
-                     feat_norm=None):
+                     feat_norm=None, content_filter=False, content_frac=0.15):
     # feat_norm: per-slice normalisation applied just before feature_network.forward.
     # Defaults to the RadImageNet normalisation (byte-identical to the validated path).
+    # content_filter: Woodland content-fraction slice keep (> content_frac nonzero);
+    # takes precedence over drop_empty. Typically paired with xy_only=True (axial-only).
+    def _mask(slices):
+        if content_filter:
+            return content_frac_mask(slices, content_frac)
+        if drop_empty:
+            return drop_empty_slice(slices, empty_threshold)
+        return [True] * len(slices)
     if feat_norm is None:
         feat_norm = radimagenet_intensity_normalisation
     if image.shape[1] == 1:
@@ -675,8 +742,7 @@ def get_features_2p5d(image, feature_network, center_slices=False,
             slices = torch.unbind(image[:, :, :, :, start_d:end_d:sample_every_k], dim=-1)
         else:
             slices = torch.unbind(image, dim=-1)
-        mapping_index = drop_empty_slice(slices, empty_threshold) if drop_empty \
-                        else [True] * len(slices)
+        mapping_index = _mask(slices)
         images_2d = torch.cat(slices, dim=0)
         images_2d = feat_norm(images_2d)
         images_2d = images_2d[mapping_index]
@@ -691,8 +757,7 @@ def get_features_2p5d(image, feature_network, center_slices=False,
             slices = torch.unbind(image[:, :, start_h:end_h:sample_every_k, :, :], dim=2)
         else:
             slices = torch.unbind(image, dim=2)
-        mapping_index = drop_empty_slice(slices, empty_threshold) if drop_empty \
-                        else [True] * len(slices)
+        mapping_index = _mask(slices)
         images_2d = torch.cat(slices, dim=0)
         images_2d = feat_norm(images_2d)
         images_2d = images_2d[mapping_index]
@@ -705,8 +770,7 @@ def get_features_2p5d(image, feature_network, center_slices=False,
             slices = torch.unbind(image[:, :, :, start_w:end_w:sample_every_k, :], dim=3)
         else:
             slices = torch.unbind(image, dim=3)
-        mapping_index = drop_empty_slice(slices, empty_threshold) if drop_empty \
-                        else [True] * len(slices)
+        mapping_index = _mask(slices)
         images_2d = torch.cat(slices, dim=0)
         images_2d = feat_norm(images_2d)
         images_2d = images_2d[mapping_index]
@@ -860,7 +924,8 @@ def build_fid_transforms(target_shape_tuple, rs_spacing_tuple,
 
 def _extract_features(loader, dataset_root, output_root, feature_network, device,
                       enable_center_slices, center_slices_ratio_final,
-                      ignore_existing, label, local_rank, num_files, feat_norm=None):
+                      ignore_existing, label, local_rank, num_files, feat_norm=None,
+                      xy_only=False, content_filter=False, content_frac=0.15):
     feats_xy, feats_yz, feats_zx = [], [], []
     for idx, batch_data in enumerate(loader, start=1):
         img = batch_data["image"].to(device)
@@ -879,9 +944,14 @@ def _extract_features(loader, dataset_root, output_root, feature_network, device
                 img_t, feature_network,
                 center_slices=enable_center_slices,
                 center_slices_ratio=center_slices_ratio_final,
-                xy_only=False,
+                xy_only=xy_only,
                 feat_norm=feat_norm,
+                content_filter=content_filter, content_frac=content_frac,
             )
+            # Single-plane (Woodland axial-only) returns (xy, None, None); mirror xy
+            # into yz/zx so the downstream vstack / per-plane FID all read xy -> Avg=xy.
+            if feats[1] is None:
+                feats = (feats[0], feats[0], feats[0])
             logger.info(f"feats shapes: {feats[0].shape}, {feats[1].shape}, {feats[2].shape}")
             feats = tuple(f.cpu() for f in feats)
             torch.save(feats, out_fp)
@@ -1021,12 +1091,16 @@ def run_fid(args, paths, device, local_rank, world_size):
     if args.fid_model_name == "med3d":
         return run_fid_3d(args, paths, device, local_rank, world_size)
 
-    enable_center_slices = args.fid_center_slices_ratio is not None
+    woodland = getattr(args, "fid_woodland", False)
+    # Woodland-exact = axial-only + content-fraction filter; center-slices ratio does
+    # not apply (all axial slices considered, kept by content, not by central band).
+    enable_center_slices = (not woodland) and (args.fid_center_slices_ratio is not None)
     enable_resampling = args.fid_resampling_spacing is not None
 
     if local_rank == 0:
         logger.info(f"FID model              : {args.fid_model_name}")
         logger.info(f"FID target shape       : {args.fid_target_shape}")
+        logger.info(f"woodland_exact         : {woodland} (content_frac={args.fid_content_frac})")
         logger.info(f"enable_center_slices   : {enable_center_slices} (ratio={args.fid_center_slices_ratio})")
         logger.info(f"enable_padding         : {args.fid_padding}")
         logger.info(f"enable_center_cropping : {args.fid_center_cropping}")
@@ -1046,7 +1120,9 @@ def run_fid(args, paths, device, local_rank, world_size):
         dino_repo=args.dino_repo, dino_arch=args.dino_arch)
     # Extractor-specific per-slice normalisation. RadImageNet keeps the validated
     # default; Inception needs [-1,1] @ 299x299; SwAV/DINOv2 need ImageNet mean/std @ 224.
-    if args.fid_model_name == "imagenet_inception":
+    if woodland:
+        feat_norm = woodland_rgb_normalisation           # 256^2 pad, no resize
+    elif args.fid_model_name == "imagenet_inception":
         feat_norm = inception_intensity_normalisation
     elif args.fid_model_name in ("imagenet_swav", "dinov2"):
         feat_norm = imagenet_rgb_normalisation
@@ -1121,14 +1197,16 @@ def run_fid(args, paths, device, local_rank, world_size):
         real_loader, dataset_root, output_root_real, feature_network, device,
         enable_center_slices, center_slices_ratio_final,
         args.fid_ignore_existing, "Real data", local_rank, len(real_filenames),
-        feat_norm=feat_norm)
+        feat_norm=feat_norm, xy_only=woodland,
+        content_filter=woodland, content_frac=args.fid_content_frac)
     logger.info(f"Real feature shapes: {real_xy.shape}, {real_yz.shape}, {real_zx.shape}")
 
     synth_xy, synth_yz, synth_zx = _extract_features(
         synth_loader, dataset_root, output_root_synth, feature_network, device,
         enable_center_slices, center_slices_ratio_final,
         args.fid_ignore_existing, "Synth data", local_rank, len(synth_filenames),
-        feat_norm=feat_norm)
+        feat_norm=feat_norm, xy_only=woodland,
+        content_filter=woodland, content_frac=args.fid_content_frac)
     logger.info(f"Synth feature shapes: {synth_xy.shape}, {synth_yz.shape}, {synth_zx.shape}")
 
     del feature_network
@@ -1275,7 +1353,8 @@ def main():
         for k in ("fid_model_name", "fid_resampling_spacing",
                   "fid_center_slices_ratio", "fid_padding",
                   "fid_center_cropping", "fid_ignore_existing",
-                  "swav_weight", "dino_repo", "dino_weight", "dino_arch"):
+                  "swav_weight", "dino_repo", "dino_weight", "dino_arch",
+                  "fid_woodland", "fid_content_frac"):
             if hasattr(args, k):
                 logger.info(f"    {k:22s}: {getattr(args, k)}")
         logger.info("  -- paths --")

@@ -59,6 +59,11 @@ fi
 : "${DINO_REPO:=}"
 : "${DINO_WEIGHT:=}"
 : "${DINO_ARCH:=dinov2_vitl14}"
+# Woodland-exact 2D FID (axial-only + content-fraction filter + 256^2 pad, single value).
+# FID_WOODLAND=1 turns it on (intended with FID_MODEL_NAME=imagenet_swav). Overrides
+# FID_CENTER_SLICES_RATIO. FID_CONTENT_FRAC = keep-slice nonzero-fraction threshold.
+: "${FID_WOODLAND:=0}"
+: "${FID_CONTENT_FRAC:=0.15}"
 # Central-slice / resampling knobs. DEFAULT 1.0 = all slices (ablation baseline, matches
 # all historical numbers). Pass FID_CENTER_SLICES_RATIO=0.4 explicitly for the MAISI-
 # matched / background-dilution probe arm (vary ONLY this vs 1.0 to attribute the cause).
@@ -84,6 +89,7 @@ DET_ARG=""; [[ "${DETERMINISTIC}" == "1" ]] && DET_ARG="--deterministic_recon"
 : "${WEIGHT_DTYPE:=fp32}"
 : "${NO_AMP:=1}"
 AMP_ARG=""; [[ "${NO_AMP}" == "1" ]] && AMP_ARG="--no_amp"
+WOODLAND_ARG=""; [[ "${FID_WOODLAND}" == "1" ]] && WOODLAND_ARG="--fid_woodland"
 # CELL (pooled only): restrict the real/conditioning set to one evaluation cell.
 #   "cohort_modality" (e.g. adni_FLAIR) → per-(cohort×modality) FID  [granularity A]
 #   "all_modality"    (e.g. all_FLAIR)  → per-modality FID, all cohorts [granularity B]
@@ -250,6 +256,8 @@ srun --cpu-bind=none,v --accel-bind=g torchrun \
       --dino_repo "${DINO_REPO}" \
       --dino_weight "${DINO_WEIGHT}" \
       --dino_arch "${DINO_ARCH}" \
+      ${WOODLAND_ARG} \
+      --fid_content_frac "${FID_CONTENT_FRAC}" \
       --fid_center_slices_ratio "${FID_CENTER_SLICES_RATIO}" \
       --fid_resampling_spacing "${FID_RESAMPLING_SPACING}" \
       --save_volume \
