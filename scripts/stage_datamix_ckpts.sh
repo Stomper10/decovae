@@ -25,7 +25,8 @@ declare -A SRC=(
   [pooled]=pooled-maisi-kl8e4-eff32-s1
 )
 MODELS=(ukbT1 ukbT1flair ukbT1adni pooled)
-STEPS="100000 120000 140000 160000 200000 240000"
+: "${STEPS:=100000 120000 140000 160000 200000 240000}"   # override to stage early ckpts, e.g. STEPS="10000 20000 ... 100000"
+: "${MODELS_OVR:=}"; [[ -n "${MODELS_OVR}" ]] && MODELS=(${MODELS_OVR})
 
 n_ok=0 n_miss=0
 for grp in "${MODELS[@]}"; do

@@ -2,11 +2,13 @@
 # GSDS-side driver: per-CELL recon metric (paired + 4-extractor rFID) for the
 # datamix specialist models + the pooled anchor, across 6 interim checkpoints.
 #
-# For each (model, cell, step) it submits a 4-job dependency CHAIN:
+# For each (model, cell, step) it submits a 5-job dependency CHAIN:
 #   J1  gen+paired+rFID  PHASE=all  radimagenet r=0.4   -> recon vols + LPIPS/PSNR/SSIM + rFID(RadImageNet)
-#   J2  fid-only         PHASE=fid  inception   r=0.4   (afterok J1, reuses recon)
-#   J3  fid-only         PHASE=fid  swav Woodland-exact (afterok J2)
-#   J4  fid-only         PHASE=fid  dinov2      r=0.4   (afterok J3)
+#   J2  fid-only         PHASE=fid  radimagenet r=1.0   (afterok J1; ratio-isolation control)
+#   J3  fid-only         PHASE=fid  inception   r=0.4   (afterok J2, reuses recon)
+#   J4  fid-only         PHASE=fid  swav Woodland-exact (afterok J3)
+#   J5  fid-only         PHASE=fid  dinov2      r=0.4   (afterok J4)
+# EXTS_OVR overrides the fid-only tag list (default "rad10 inception swav dinov2").
 # The chain guarantees recon exists before the fid-only jobs and serialises the
 # shared feature-cache path (ignore_existing=True anyway recomputes per run).
 #
@@ -56,12 +58,16 @@ declare -A CELLS=(
 gen_env()  { echo "PHASE=all FID_MODEL_NAME=radimagenet_resnet50 FID_CENTER_SLICES_RATIO=${FID_R}"; }
 ext_env()  { # $1 = extractor tag
   case "$1" in
+    rad10)     echo "PHASE=fid FID_MODEL_NAME=radimagenet_resnet50 FID_CENTER_SLICES_RATIO=1.0";;
     inception) echo "PHASE=fid FID_MODEL_NAME=imagenet_inception FID_CENTER_SLICES_RATIO=${FID_R}";;
     swav)      echo "PHASE=fid FID_MODEL_NAME=imagenet_swav FID_WOODLAND=1 FID_CONTENT_FRAC=${CONTENT_FRAC} SWAV_WEIGHT=${SWAV_WEIGHT:?set SWAV_WEIGHT}";;
     dinov2)    echo "PHASE=fid FID_MODEL_NAME=dinov2 FID_CENTER_SLICES_RATIO=${FID_R} DINO_REPO=${DINO_REPO:?set DINO_REPO} DINO_WEIGHT=${DINO_WEIGHT:?set DINO_WEIGHT} DINO_ARCH=${DINO_ARCH:-dinov2_vitl14}";;
   esac
 }
-EXTS=(inception swav dinov2)
+# rad10 = RadImageNet r=1.0 control: isolates whether the convergence-band
+# insensitivity is driven by ratio (r=1.0 flat vs J1 r=0.4) or by the extractor.
+: "${EXTS_OVR:=}"
+if [[ -n "${EXTS_OVR}" ]]; then EXTS=(${EXTS_OVR}); else EXTS=(rad10 inception swav dinov2); fi
 
 submit() { # $1=depflag(""|--dependency=afterok:JID)  $2..=ENV assignments ; prints jobid
   local dep="$1"; shift
