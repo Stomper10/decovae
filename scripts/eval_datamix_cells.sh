@@ -42,6 +42,7 @@ CM="${SCRIPT_DIR}/compute_metric.sh"
 : "${NUM_IMAGES:=500}"        # per-cell recon sample count (report per-cell convention)
 : "${FID_R:=0.4}"             # ratio for the 2.5D extractors (RadImageNet/Inception/DINOv2)
 : "${CONTENT_FRAC:=0.15}"     # Woodland content threshold for SwAV
+: "${SPLIT:=valid}"           # valid (default) or test; test -> *_test.csv real set, _test-tagged outputs
 : "${DRYRUN:=0}"
 
 # --- grid ----------------------------------------------------------------------
@@ -88,7 +89,7 @@ for grp in ${MODELS}; do
     for cell in ${CELLS[$grp]}; do
       n_rows=$((n_rows+1))
       echo "[row] ${grp}  cell=${cell}  ck${step}"
-      common="EXP_NAME=${exp} STAGE=stage1 VAE_CKPT_NAME=checkpoint-${step} EVAL_MODE=real_vs_recon DETERMINISTIC=1 NUM_IMAGES=${NUM_IMAGES} CELL=${cell}"
+      common="EXP_NAME=${exp} STAGE=stage1 VAE_CKPT_NAME=checkpoint-${step} EVAL_MODE=real_vs_recon DETERMINISTIC=1 NUM_IMAGES=${NUM_IMAGES} CELL=${cell} SPLIT=${SPLIT}"
       # J1: gen + paired + RadImageNet rFID
       jid=$(submit "" ${common} $(gen_env)); n_jobs=$((n_jobs+1))
       echo "    J1 radimagenet r=${FID_R}  jid=${jid}"

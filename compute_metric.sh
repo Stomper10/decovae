@@ -78,6 +78,16 @@ source "${SCRIPT_DIR}/scripts/resolve_dataset.sh"
 # UNET_EXP_NAME defaults to EXP_NAME, but can be overridden when VAE and UNet
 # live under different experiment dirs (e.g. DFT VAE + plain stage2 UNet).
 : "${UNET_EXP_NAME:=${EXP_NAME}}"
+# SPLIT: which real-set manifest to evaluate against. 'valid' (default, back-compat)
+# or 'test'. test derives the *_test.csv sibling of VALID_CSV and namespaces every
+# output with a _test tag (see EVAL_TAG below) so a test run never clobbers a valid
+# run in the same experiment dir. Override TEST_CSV to point elsewhere.
+: "${SPLIT:=valid}"
+if [[ "${SPLIT}" == "test" ]]; then
+    : "${TEST_CSV:=${VALID_CSV/valid/test}}"
+    [[ -f "${TEST_CSV}" ]] || { echo "[compute_metric.sh] SPLIT=test but not found: ${TEST_CSV}" >&2; exit 1; }
+    : "${BASE_CSV:=${TEST_CSV}}"
+fi
 : "${BASE_CSV:=${VALID_CSV}}"
 : "${OTHER_CSV:=${TRAIN_CSV}}"
 : "${DATASET_CFG:=configs/${DATASET}/dataset.json}"
@@ -122,7 +132,8 @@ fi
 #     the filtered CSV is shared across a guidance sweep).
 if [[ -n "${CELL}" ]]; then
     CELL_COHORT="${CELL%_*}"; CELL_MOD="${CELL##*_}"
-    CELL_CSV="${MAIN_EXP_DIR}/cells/${CELL}/base_${CELL}.csv"
+    CELL_DIR="cells/${CELL}"; [[ "${SPLIT}" == "test" ]] && CELL_DIR="cells/${CELL}_test"
+    CELL_CSV="${MAIN_EXP_DIR}/${CELL_DIR}/base_${CELL}.csv"
     mkdir -p "$(dirname "${CELL_CSV}")"
     python3 - <<PY
 import pandas as pd
@@ -140,6 +151,7 @@ fi
 # (2) output isolation + postfix from the combined {CELL, GTAG} tag. With CELL set
 #     and g=1.0 this reduces to the previous cells/<CELL> layout (backwards-compatible).
 EVAL_TAG="${CELL}"
+[[ "${SPLIT}" == "test" ]] && EVAL_TAG="${EVAL_TAG:+${EVAL_TAG}_}test"
 [[ -n "${GTAG}" ]] && EVAL_TAG="${EVAL_TAG:+${EVAL_TAG}_}${GTAG}"
 if [[ -n "${EVAL_TAG}" ]]; then
     EXP_DIR="${MAIN_EXP_DIR}/cells/${EVAL_TAG}"
@@ -170,6 +182,7 @@ echo "  EVAL_MODE  : ${EVAL_MODE}"
 echo "  PHASE      : ${PHASE}"
 echo "  NUM_IMAGES : ${NUM_IMAGES}"
 echo "  POSTFIX    : ${POSTFIX}"
+echo "  SPLIT      : ${SPLIT}  (base_csv=${BASE_CSV})"
 echo "  CELL       : ${CELL:-<none>}"
 echo "  GUIDANCE   : ${GUIDANCE_SCALE} (tag=${GTAG:-<none>})"
 echo "  EXP_DIR    : ${EXP_DIR}"
