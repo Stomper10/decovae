@@ -29,6 +29,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from datetime import timedelta
 from tqdm import tqdm
+from scipy.ndimage import binary_erosion
 from skimage.metrics import structural_similarity as ssim
 
 import torch
@@ -91,6 +92,24 @@ def load_config():
                         help="real_vs_recon: decode the posterior MEAN z=z_mu instead of "
                              "the stochastic sample z=z_mu+eps*z_sigma (matches a deterministic "
                              "recon; removes the sampling-noise asymmetry vs VQ models)")
+    parser.add_argument("--ssim_foreground", action="store_true",
+                        help="real_vs_recon: ALSO report a background-excluded SSIM (ssim_fg) "
+                             "alongside the whole-volume SSIM. Whole-volume SSIM is dominated "
+                             "by background: where real and recon are both constant 0 the local "
+                             "SSIM is ~1 (inflating the mean), but a small non-zero background "
+                             "residue in the recon collapses the structure term to ~0 over most "
+                             "of the volume (deflating it). Both failure modes are decoupled "
+                             "from LPIPS/PSNR, which is why SSIM disagrees with them. ssim_fg "
+                             "averages the per-voxel SSIM map over a foreground mask taken from "
+                             "the REAL volume only, so the mask is identical across models.")
+    parser.add_argument("--ssim_fg_thresh", type=float, default=1e-6,
+                        help="Foreground threshold on the clamped REAL volume for "
+                             "--ssim_foreground (default 1e-6; inputs are skull-stripped so the "
+                             "background is exactly 0).")
+    parser.add_argument("--ssim_fg_erode", type=int, default=0,
+                        help="Erode the --ssim_foreground mask by this many voxels before "
+                             "averaging (default 0). SSIM's 7^3 window straddles the brain "
+                             "boundary, so erode>=3 drops windows that still see background.")
     parser.add_argument("--postfix", type=str, default="30step")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--guidance_scale", type=float, default=1.0,
@@ -384,7 +403,7 @@ def run_generation(args, paths, device, local_rank, world_size):
     slice_dir = paths["slices_dir"]
     volumes_dir = paths["volumes_dir"]
 
-    local_metrics = {"lpips": 0.0, "psnr": 0.0, "ssim": 0.0, "count": 0}
+    local_metrics = {"lpips": 0.0, "psnr": 0.0, "ssim": 0.0, "ssim_fg": 0.0, "count": 0}
 
     for i in tqdm(my_indices, desc=f"GPU {local_rank} [{args.eval_mode}]",
                   position=local_rank, leave=True):
@@ -445,9 +464,22 @@ def run_generation(args, paths, device, local_rank, world_size):
 
                     local_metrics["lpips"] += loss_perceptual(recon_clip, images_clip).item()
                     local_metrics["psnr"] += compute_psnr(recon_clip.cpu().numpy(), images_clip.cpu().numpy())
-                    local_metrics["ssim"] += ssim(recon_clip.squeeze().cpu().numpy(),
-                                                  images_clip.squeeze().cpu().numpy(),
-                                                  data_range=1.0)
+                    recon_np = recon_clip.squeeze().cpu().numpy()
+                    real_np = images_clip.squeeze().cpu().numpy()
+                    if args.ssim_foreground:
+                        # full=True also returns the per-voxel SSIM map; the scalar it
+                        # returns alongside is exactly the unmasked mean, so this stays
+                        # bit-identical to the legacy ssim column.
+                        ssim_val, ssim_map = ssim(recon_np, real_np, data_range=1.0, full=True)
+                        fg = real_np > args.ssim_fg_thresh
+                        if args.ssim_fg_erode > 0:
+                            fg = binary_erosion(fg, iterations=args.ssim_fg_erode)
+                        # An all-background volume would make the mask empty; fall back to
+                        # the unmasked value rather than emitting a NaN into the average.
+                        local_metrics["ssim_fg"] += float(ssim_map[fg].mean()) if fg.any() else ssim_val
+                    else:
+                        ssim_val = ssim(recon_np, real_np, data_range=1.0)
+                    local_metrics["ssim"] += ssim_val
                     local_metrics["count"] += 1
 
         # ----- real_vs_gen -----
@@ -553,12 +585,13 @@ def run_generation(args, paths, device, local_rank, world_size):
     # Aggregate recon metrics across ranks
     if args.eval_mode == "real_vs_recon":
         t = torch.tensor([local_metrics["lpips"], local_metrics["psnr"],
-                          local_metrics["ssim"], float(local_metrics["count"])],
+                          local_metrics["ssim"], local_metrics["ssim_fg"],
+                          float(local_metrics["count"])],
                          device=device, dtype=torch.float64)
         if dist.is_initialized():
             dist.all_reduce(t, op=dist.ReduceOp.SUM)
         if local_rank == 0:
-            count = t[3].item()
+            count = t[4].item()
             if count > 0:
                 lpips_avg = t[0].item() / count
                 psnr_avg = t[1].item() / count
@@ -568,6 +601,11 @@ def run_generation(args, paths, device, local_rank, world_size):
                 print(f"LPIPS : {lpips_avg:.4f}")
                 print(f"PSNR  : {psnr_avg:.4f}")
                 print(f"SSIM  : {ssim_avg:.4f}")
+                if args.ssim_foreground:
+                    # NOT comparable to the SSIM above or to any historical SSIM number:
+                    # removing the background drops the inflation term for every model.
+                    print(f"SSIM_FG: {t[3].item() / count:.4f} "
+                          f"(thresh={args.ssim_fg_thresh:g}, erode={args.ssim_fg_erode})")
                 print("=" * 50)
             else:
                 print("No metrics computed (count = 0).")

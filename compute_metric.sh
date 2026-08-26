@@ -95,6 +95,14 @@ fi
 # DETERMINISTIC=1 -> real_vs_recon decodes z=z_mu (no posterior sampling noise)
 : "${DETERMINISTIC:=0}"
 DET_ARG=""; [[ "${DETERMINISTIC}" == "1" ]] && DET_ARG="--deterministic_recon"
+
+# SSIM_FG=1 -> ALSO report background-excluded SSIM (ssim_fg) next to whole-volume SSIM.
+# Not comparable to historical SSIM numbers; see --ssim_foreground in compute_metric.py.
+: "${SSIM_FG:=0}"
+: "${SSIM_FG_THRESH:=1e-6}"
+: "${SSIM_FG_ERODE:=0}"
+SSIMFG_ARG=""
+[[ "${SSIM_FG}" == "1" ]] && SSIMFG_ARG="--ssim_foreground --ssim_fg_thresh ${SSIM_FG_THRESH} --ssim_fg_erode ${SSIM_FG_ERODE}"
 # D2: evaluation precision. fp32 + no-amp = reproducible FID (default).
 : "${WEIGHT_DTYPE:=fp32}"
 : "${NO_AMP:=1}"
@@ -251,7 +259,7 @@ srun --cpu-bind=none,v --accel-bind=g torchrun \
       --eval_mode "${EVAL_MODE}" \
       --phase "${PHASE}" \
       --num_images "${NUM_IMAGES}" \
-      ${DET_ARG} \
+      ${DET_ARG} ${SSIMFG_ARG} \
       ${AMP_ARG} \
       --weight_dtype "${WEIGHT_DTYPE}" \
       --postfix "${POSTFIX}" \
