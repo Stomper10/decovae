@@ -1,6 +1,6 @@
 {
     "diffusion_unet_train": {
-        "batch_size": 4,
+        "batch_size": 2,
         "cache_rate": 0.1,
         "checkpointing_steps": 10000,
         "gradient_accumulation_steps": 1,
@@ -16,11 +16,21 @@
         "weight_dtype": "bf16"
     },
     "diffusion_unet_inference": {
-        "bottom_region_index": [0, 0, 1, 0],
+        "bottom_region_index": [
+            0,
+            0,
+            1,
+            0
+        ],
         "modality": 1,
         "num_inference_steps": 30,
         "random_seed": 0,
         "stochastic_scale": 0,
-        "top_region_index": [0, 1, 0, 0]
+        "top_region_index": [
+            0,
+            1,
+            0,
+            0
+        ]
     }
 }
