@@ -1,0 +1,46 @@
+{
+    "data_option": {
+        "random_aug": true,
+        "spacing_type": "original",
+        "spacing": null
+    },
+    "autoencoder_train": {
+        "batch_size": 8,
+        "patch_size": [
+            64,
+            64,
+            64
+        ],
+        "val_batch_size": 1,
+        "val_patch_size": null,
+        "val_sliding_window_patch_size": [
+            64,
+            64,
+            64
+        ],
+        "lr": 0.0002,
+        "perceptual_weight": 0.3,
+        "kl_weight": 0.005,
+        "adv_weight": 0.1,
+        "disc_weight": 0.5,
+        "recon_loss": "l1",
+        "cache": 0.0,
+        "amp": true
+    },
+    "custom_config": {
+        "weight_dtype": "bf16",
+        "seed": 42,
+        "report_to": true,
+        "output_dir": null,
+        "max_train_steps": 250,
+        "num_valid": 112,
+        "checkpointing_steps": 100000,
+        "validation_steps": 100000,
+        "early_stop_patience": 100000000,
+        "early_stop_min_delta": 0.01,
+        "gradient_accumulation_steps": 1,
+        "pretrained_steps": 0,
+        "adv_warmup_steps": 0,
+        "compile_mode": null
+    }
+}

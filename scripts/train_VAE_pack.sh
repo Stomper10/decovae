@@ -28,7 +28,7 @@ cd "${SCRIPT_DIR}"
 export DATASET=pooled
 source scripts/resolve_dataset.sh
 
-TRAIN_CFG="configs/pooled/vae_train_stage1_eff32.json"   # eff32: bs/gpu=4, lr1.41e-4, 320K steps, adv_warmup16k, kl5e-3
+TRAIN_CFG="configs/pooled/vae_train_stage1_eff32_kl8e4.json"   # eff32 @ kl=8e-4 (band winner; kl5e-3 over-reg, kl5e-4 MIUA-cliff — see klprobe1/2)
 DATASET_CFG="configs/${DATASET}/dataset.json"
 MODEL_CFG="configs/${DATASET}/model_fm.json"
 OUT="${OUTPUT_ROOT}/stage1"
@@ -37,9 +37,9 @@ mkdir -p "${RUNDIR}"
 
 # stage1 ablation set co-resident.  EXP_NAME:lambda_cov:lambda_cor:lambda_var
 RUNS=(
-  "pooled-maisi-kl5e3-eff32-s1:0:0:0"
-  "pooled-sid-cor50-kl5e3-eff32-s1:0:50:0"
-  "pooled-vad-cov50-kl5e3-eff32-s1:50:0:50"
+  "pooled-maisi-kl8e4-eff32-s1:0:0:0"
+  "pooled-sid-cor50-kl8e4-eff32-s1:0:50:0"
+  "pooled-vad-cov50-kl8e4-eff32-s1:50:0:50"
 )
 NG="${SLURM_GPUS_ON_NODE:-8}"
 NGRP=${#RUNS[@]}
