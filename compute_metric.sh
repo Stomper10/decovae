@@ -129,6 +129,13 @@ WOODLAND_ARG=""; [[ "${FID_WOODLAND}" == "1" ]] && WOODLAND_ARG="--fid_woodland"
 # per-guidance evaluation only namespaces the OUTPUT dir (volumes/features/filelists).
 MAIN_EXP_DIR="${OUTPUT_DIR_BASE}/${EXP_NAME}"
 
+# OUT_TAG: extra output-isolation suffix appended to the cells/<tag> dir.
+# Recon PNGs/volumes are named {i}_recon_xyz.png / recon_{i}.nii.gz with NO
+# checkpoint in the name, so two checkpoints of the same EXP_NAME+CELL silently
+# overwrite each other's images. Set OUT_TAG=ck240k when you need a specific
+# checkpoint's recons to survive (e.g. a cross-model eyeball A/B).
+: "${OUT_TAG:=}"
+
 # guidance tag (real_vs_gen + g!=1.0 only): 2.0 -> g20, 1.5 -> g15
 GTAG=""
 if [[ "${EVAL_MODE}" == "real_vs_gen" \
@@ -161,6 +168,7 @@ fi
 EVAL_TAG="${CELL}"
 [[ "${SPLIT}" == "test" ]] && EVAL_TAG="${EVAL_TAG:+${EVAL_TAG}_}test"
 [[ -n "${GTAG}" ]] && EVAL_TAG="${EVAL_TAG:+${EVAL_TAG}_}${GTAG}"
+[[ -n "${OUT_TAG}" ]] && EVAL_TAG="${EVAL_TAG:+${EVAL_TAG}_}${OUT_TAG}"
 if [[ -n "${EVAL_TAG}" ]]; then
     EXP_DIR="${MAIN_EXP_DIR}/cells/${EVAL_TAG}"
     POSTFIX="${POSTFIX}_${EVAL_TAG}"
