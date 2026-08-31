@@ -12,6 +12,7 @@ from tqdm import trange
 
 import torch
 import torch.distributed as dist
+from datetime import timedelta
 from torch.optim import lr_scheduler
 from torch.nn.utils import clip_grad_norm_
 from torch.amp import GradScaler, autocast
@@ -50,7 +51,11 @@ def setup_ddp():
     print(f"[ddp-init] host={socket.gethostname()} rank={rank} local_rank={local_rank} "
           f"CUDA_VISIBLE_DEVICES={cvd} torch.cuda.device_count()={dev_cnt}", flush=True)
 
-    dist.init_process_group(backend="nccl")
+    # Collective timeout: PyTorch's 10-minute default proved too tight on this cluster —
+    # every UNet pack allocation died on a 600 s ALLREDUCE watchdog (2026-08-30). Same
+    # knob as train_UNET.py so the two stay consistent.
+    pg_timeout_min = int(os.environ.get("NCCL_PG_TIMEOUT_MIN", "30"))
+    dist.init_process_group(backend="nccl", timeout=timedelta(minutes=pg_timeout_min))
     torch.cuda.set_device(local_rank)
 
 def cleanup_ddp(): 

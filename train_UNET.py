@@ -22,6 +22,7 @@ from tqdm import trange
 
 import torch
 import torch.distributed as dist
+from datetime import timedelta
 from torch.nn.utils import clip_grad_norm_
 from torch.amp import GradScaler, autocast
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -60,7 +61,14 @@ def setup_ddp():
     print(f"[ddp-init] host={socket.gethostname()} rank={rank} local_rank={local_rank} "
           f"CUDA_VISIBLE_DEVICES={cvd} torch.cuda.device_count()={dev_cnt}", flush=True)
 
-    dist.init_process_group(backend="nccl")
+    # Collective timeout: PyTorch defaults to 10 min, which is too tight under the
+    # 3-group co-residency pack. On 2026-08-30 all THREE independent groups (separate
+    # torchrun, separate NCCL comms) stopped progressing in the same second and every
+    # watchdog fired at exactly 600,0xx ms -> a shared-resource stall (node/MPS/FS),
+    # not a per-group bug. 30 min turns such a hiccup into a pause instead of a
+    # SIGABRT that costs the whole SLURM allocation. Override with NCCL_PG_TIMEOUT_MIN.
+    pg_timeout_min = int(os.environ.get("NCCL_PG_TIMEOUT_MIN", "30"))
+    dist.init_process_group(backend="nccl", timeout=timedelta(minutes=pg_timeout_min))
     torch.cuda.set_device(local_rank)
 
 
