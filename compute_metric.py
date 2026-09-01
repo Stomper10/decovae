@@ -232,8 +232,13 @@ def derive_paths(args):
         paths["synth_filelist"]     = os.path.join(exp, f"filelist_gen_{args.num_images}.txt")
         paths["synth_features_dir"] = "gen_features"
     else:
-        paths["synth_filelist"]     = None
-        paths["synth_features_dir"] = None
+        # real_vs_real: the "synthetic" side is the second real set (other_*), so
+        # the FID it reports is the NULL FLOOR -- what a perfect generator would
+        # score at this n and this extractor. base/other must be DISJOINT real
+        # samples of the same slice (scripts/build_gfid_slices.py writes the
+        # _nullA / _nullB pair for exactly this).
+        paths["synth_filelist"]     = os.path.join(exp, f"filelist_other_{args.num_images}.txt")
+        paths["synth_features_dir"] = "other_features"
     return paths
 
 
@@ -1062,8 +1067,12 @@ def run_fid_3d(args, paths, device, local_rank, world_size):
     dataset_root = paths["volumes_dir"]
 
     if local_rank == 0:
-        synth_glob = ("recon_*.nii.gz" if args.eval_mode == "real_vs_recon"
-                      else f"gen_*_{args.postfix}.nii.gz")
+        if args.eval_mode == "real_vs_recon":
+            synth_glob = "recon_*.nii.gz"
+        elif args.eval_mode == "real_vs_real":
+            synth_glob = "other_*.nii.gz"
+        else:
+            synth_glob = f"gen_*_{args.postfix}.nii.gz"
         for fl, pattern in ((paths["real_filelist"], "base_*.nii.gz"),
                             (paths["synth_filelist"], synth_glob)):
             if fl and not os.path.isfile(fl):
@@ -1186,9 +1195,14 @@ def run_fid(args, paths, device, local_rank, world_size):
     # as-is (e.g. a manually trimmed N=126 list), so this only fills the gap.
     #   real  = base_*                 synth = recon_*            (real_vs_recon)
     #                                         = gen_*_<postfix>*  (real_vs_gen)
+    #                                         = other_*           (real_vs_real, null floor)
     if local_rank == 0:
-        synth_glob = ("recon_*.nii.gz" if args.eval_mode == "real_vs_recon"
-                      else f"gen_*_{args.postfix}.nii.gz")
+        if args.eval_mode == "real_vs_recon":
+            synth_glob = "recon_*.nii.gz"
+        elif args.eval_mode == "real_vs_real":
+            synth_glob = "other_*.nii.gz"
+        else:
+            synth_glob = f"gen_*_{args.postfix}.nii.gz"
         for fl, pattern in ((paths["real_filelist"], "base_*.nii.gz"),
                             (paths["synth_filelist"], synth_glob)):
             if fl and not os.path.isfile(fl):
@@ -1415,7 +1429,7 @@ def main():
         if dist.is_initialized():
             dist.barrier()
 
-    if args.phase in ("fid", "all") and args.eval_mode != "real_vs_real":
+    if args.phase in ("fid", "all"):
         run_fid(args, paths, device, local_rank, world_size)
 
     if local_rank == 0:
