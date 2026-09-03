@@ -38,7 +38,12 @@
 #SBATCH --signal=B:TERM@180
 #SBATCH -o /data/wonyoungjang/decodata/pooled/stage1/dft/dft_%j.log
 #SBATCH --open-mode=append
-set -uo pipefail
+# NOT `set -u`: env.local.sh runs `conda activate`, which sources /etc/bashrc,
+# which expands $BASHRCSOURCED unbound -> the shell exits before the first echo
+# and the job dies with a one-line log. Killed job 263079 that way on 2026-09-01.
+# `resolve_dataset.sh` also does indirect ${!var} expansion on unset per-dataset
+# vars. Every other launcher here runs without -u for the same reason.
+set -o pipefail
 
 SCRIPT_DIR="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 cd "${SCRIPT_DIR}"
