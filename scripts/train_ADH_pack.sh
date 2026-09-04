@@ -18,8 +18,15 @@
 #
 # EPOCHS ARE PER TARGET, not the shared 60 the single-target launcher defaults to.
 # That default came from the brain-age regressor. Modality is a 3-way call between
-# T1/T2/FLAIR, which differ in gross contrast — it converges in a fraction of that,
-# and 51k x 60 epochs would likely not even fit the 12h wall.
+# T1/T2/FLAIR, which differ in gross contrast, so it converges in a fraction of that.
+#
+# WALLTIME IS 24h, THE PARTITION MAXIMUM — not the 12h the single-target launchers
+# ask for, which was their own choice rather than a limit (gpu-4farm MaxTime is
+# 1-00:00:00, same as 8farm). It matters here because the four judges together read
+# ~5.4M volumes of 14.2 MB = ~77 TB, and the measured cache throughput is 3.67 GB/s
+# at 32 readers, putting the I/O floor near 6h before any GPU time. 12h left little
+# margin, and train_attr_predictor.py has NO resume — an interrupted group restarts
+# from zero, so hitting the wall is expensive rather than merely slow.
 #
 # CLASS WEIGHTING IS NOT OPTIONAL for modality and dx. Modality train is
 # T1 26,146 / FLAIR 21,987 / T2 3,036 — an 8.6x imbalance. Unweighted, the classifier
@@ -32,7 +39,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:h100:4
 #SBATCH --cpus-per-task=112
-#SBATCH --time=12:00:00
+#SBATCH --time=1-00:00:00
 #SBATCH --requeue
 #SBATCH --signal=B:TERM@180
 #SBATCH -o /data/wonyoungjang/decodata/pooled/downstream/adhpack/adhpack_%j.log
@@ -52,7 +59,11 @@ OUT="${OUTPUT_ROOT}/downstream/adherence"
 RUNDIR="${OUTPUT_ROOT}/downstream/adhpack"; mkdir -p "${RUNDIR}" "${OUT}"
 
 # name : task : epochs : label_map   (label_map empty => regression)
-GROUPS=(
+#
+# NOT named GROUPS: that is a bash builtin holding the caller's group IDs, and
+# assigning to it is silently ignored — the loop then iterated over the GIDs
+# (1088, 1185) with every field empty. Job 263853 died in preflight that way.
+JUDGES=(
   "modality_clf:cls:15:{\"T1\":0,\"T2\":1,\"FLAIR\":2}"
   "sex_clf:cls:30:{\"M\":0,\"F\":1}"
   "dx_clf:cls:60:{\"healthy\":0,\"MCI\":1,\"AD\":2}"
@@ -74,13 +85,19 @@ export CUDA_VISIBLE_DEVICES=$(seq -s, 0 $((NG-1)))
 # ---------------------------------------------------------------------------
 fail=0
 declare -a TODO=()
-for spec in "${GROUPS[@]}"; do
+for spec in "${JUDGES[@]}"; do
   IFS=':' read -r name task epochs lmap <<< "${spec}"
   tgt="${TGT[$name]}"
   exp="${OUT}/${name}"; mkdir -p "${exp}/logs" "${exp}/weights"
   tr_csv="${exp}/adh_${tgt}_train.csv"; va_csv="${exp}/adh_${tgt}_valid.csv"
-  if [[ -f "${exp}/weights/best.pt" ]]; then
-    echo "[preflight] ${name}: best.pt exists — skipping"
+  # Skip on a COMPLETION sentinel, never on best.pt. best.pt is written the first
+  # time balanced_acc improves (train_attr_predictor.py:161-169), i.e. after epoch
+  # one — so keying the skip on it would make a walltime resubmit mark every
+  # partially-trained group "done" and hand us an undertrained judge with no error.
+  # train_attr_predictor.py has no resume either, so an interrupted group must
+  # restart from scratch; the sentinel is what makes that happen.
+  if [[ -f "${exp}/weights/.adhpack_done" ]]; then
+    echo "[preflight] ${name}: already complete — skipping"
     continue
   fi
   python3 scripts/build_adherence_csv.py --manifest "${TRAIN_CSV}" --target "${tgt}" \
@@ -145,11 +162,14 @@ for spec in "${TODO[@]}"; do
   else
     MOD=(-m downstream.train_brain_age)
   fi
-  TORCHINDUCTOR_CACHE_DIR="${exp}/torchinductor" TRITON_CACHE_DIR="${exp}/triton" \
-  torchrun --nproc_per_node=${NG} --nnodes=1 --node_rank=0 \
-    --master_addr=127.0.0.1 --master_port="${PORT}" \
-    "${MOD[@]}" "${COMMON[@]}" \
-    >> "${exp}/logs/${name}_adhpack_${SLURM_JOB_ID}.log" 2>&1 &
+  # The sentinel is touched only when torchrun EXITS 0, so a walltime kill leaves
+  # it absent and the resubmit retrains this group from the start.
+  ( TORCHINDUCTOR_CACHE_DIR="${exp}/torchinductor" TRITON_CACHE_DIR="${exp}/triton" \
+    torchrun --nproc_per_node=${NG} --nnodes=1 --node_rank=0 \
+      --master_addr=127.0.0.1 --master_port="${PORT}" \
+      "${MOD[@]}" "${COMMON[@]}" \
+      >> "${exp}/logs/${name}_adhpack_${SLURM_JOB_ID}.log" 2>&1 \
+    && touch "${exp}/weights/.adhpack_done" ) &
   PIDS+=($!)
   echo "launched ${name} (pid $!, task=${task}, epochs=${epochs}) port ${PORT}; staggering ${STAGGER_SEC}s"
   PORT=$((PORT+10))
@@ -165,10 +185,10 @@ echo quit | nvidia-cuda-mps-control 2>/dev/null && echo "[MPS] daemon stopped"
 need_more=0; done_n=0
 for spec in "${TODO[@]}"; do
   IFS=':' read -r name _ _ _ <<< "${spec}"
-  if [[ -f "${OUT}/${name}/weights/best.pt" ]]; then
-    echo "  ${name}: best.pt OK"; done_n=$((done_n+1))
+  if [[ -f "${OUT}/${name}/weights/.adhpack_done" ]]; then
+    echo "  ${name}: complete"; done_n=$((done_n+1))
   else
-    echo "  ${name}: NO best.pt"; need_more=1
+    echo "  ${name}: INCOMPLETE (no resume — will retrain from scratch)"; need_more=1
   fi
 done
 
