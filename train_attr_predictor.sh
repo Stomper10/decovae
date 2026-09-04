@@ -1,5 +1,12 @@
 #!/bin/bash
-# SFCN attribute classifier (adherence predictor) — sex / dx (AD/MCI/CN or 4-way).
+# SFCN attribute classifier (adherence predictor) — modality / sex / dx.
+#
+# modality is the PRIMARY adherence axis: it is present on 100% of volumes and is the
+# one attribute CFG never drops (cfg_drop_presence keep_idx=(0,)), so it is the only
+# condition the model always actually received. T1c is excluded — it is vae_only and
+# outside the diffusion modality vocabulary, so the generator could never emit it.
+#   DATASET=pooled TARGET=modality LABEL_MAP='{"T1":0,"T2":1,"FLAIR":2}' CLASS_WEIGHTED=1 \
+#     EXP_NAME=modality_clf sbatch train_attr_predictor.sh
 #
 # sex:
 #   TARGET=sex LABEL_MAP='{"M":0,"F":1}' EXP_NAME=sex_clf sbatch train_attr_predictor.sh
@@ -37,6 +44,7 @@ source "${SCRIPT_DIR}/scripts/resolve_dataset.sh"
 : "${REAL_LIMIT:=}"
 : "${COHORTS:=}"                # build_adherence_csv cohort filter (dx defaults to adni,oasis)
 : "${DX_LABELS:=healthy,MCI,AD}"  # dx classes (CN == healthy in the manifest)
+: "${MODALITY_LABELS:=T1,T2,FLAIR}"  # modality classes (T1c excluded: vae_only)
 # Hyperparams (env-overrideable; defaults match the brain-age regressor).
 : "${EPOCHS:=60}"
 : "${BS:=4}"
@@ -58,9 +66,11 @@ ADH_TRAIN_CSV="${EXP_DIR}/adh_${TARGET}_train.csv"
 ADH_VALID_CSV="${EXP_DIR}/adh_${TARGET}_valid.csv"
 COH_FLAG=""; [[ -n "${COHORTS}" ]] && COH_FLAG="--cohorts ${COHORTS}"
 python3 scripts/build_adherence_csv.py --manifest "${TRAIN_CSV}" --target "${TARGET}" \
-    --out_csv "${ADH_TRAIN_CSV}" --dx_labels "${DX_LABELS}" ${COH_FLAG}
+    --out_csv "${ADH_TRAIN_CSV}" --dx_labels "${DX_LABELS}" \
+    --modality_labels "${MODALITY_LABELS}" ${COH_FLAG}
 python3 scripts/build_adherence_csv.py --manifest "${VALID_CSV}" --target "${TARGET}" \
-    --out_csv "${ADH_VALID_CSV}" --dx_labels "${DX_LABELS}" ${COH_FLAG}
+    --out_csv "${ADH_VALID_CSV}" --dx_labels "${DX_LABELS}" \
+    --modality_labels "${MODALITY_LABELS}" ${COH_FLAG}
 
 export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n1)
 export MASTER_PORT=$((10000 + RANDOM % 50000))

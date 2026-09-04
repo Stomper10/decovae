@@ -217,18 +217,27 @@ UNET_PATH="${UNET_EXP_DIR}/weights/unet/${UNET_CKPT_NAME}"
 # (autoencoder_def, noise_scheduler, diffusion_unet_def) plus inference
 # scalars (num_inference_steps, scale_factor, global_mean) for real_vs_gen.
 # Build a merged config under EXP_DIR/logs/ from:
-#   - configs/${DATASET}/model_fm.json     (model defs)
+#   - ${MODEL_CFG}                          (model defs; see below)
 #   - configs/${DATASET}/diff_train_inf.json -> num_inference_steps
 #   - ${UNET_EXP_DIR}/analysis/latent_stats.csv -> scale_factor / global_mean
 # The latent stats live under UNET_EXP_DIR because DFT only re-tunes the
 # decoder; encoder embeddings (and therefore latent stats) are shared with the
 # plain stage2 run.
+# MODEL_CFG must match the conditioning the checkpoint was TRAINED with. The
+# A-config UNets carry a 19-D conditioning vector (modality/sex/dx/cohort one-hots
+# + age/cdrsb [value,flag]) against B's 13-D, so building them from model_fm.json
+# gives token_encoder.mlp.0.weight (256,13) against the checkpoint's (256,19).
+# compute_metric.py loads the UNet with strict=True (l.332), so that fails loudly
+# rather than silently decoding noise — but it does fail, hence this override:
+#   MODEL_CFG=configs/pooled/model_fm_cohort.json  for any *-Acfg UNet.
+: "${MODEL_CFG:=configs/${DATASET}/model_fm.json}"
+
 MERGED_CONFIG_DIR="${LOGS_DIR}"
 CONFIG_PATH="${MERGED_CONFIG_DIR}/merged_config_${SLURM_JOB_ID:-$$}.json"
 LATENT_STATS_CSV="${UNET_EXP_DIR}/analysis/latent_stats.csv"
 python3 - <<PY
 import json, os, sys
-m = json.load(open("${SCRIPT_DIR}/configs/${DATASET}/model_fm.json"))
+m = json.load(open(os.path.join("${SCRIPT_DIR}", "${MODEL_CFG}")))
 # Disable MAISI's norm_float16 training-memory trick for eval: it hard-casts
 # GroupNorm output to fp16, which crashes the next conv under fp32+no_amp.
 if isinstance(m.get("autoencoder_def"), dict):
