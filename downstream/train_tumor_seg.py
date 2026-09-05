@@ -85,11 +85,24 @@ def main(args: argparse.Namespace) -> None:
 
     with open(args.dataset_config_path) as f:
         ds_cfg = json.load(f)
-    resolution = tuple(args.resolution or ds_cfg.get("resolution", [240, 240, 155]))
-    roi_size = tuple(args.roi_size or [128, 128, 128])
+    # resolution comes from the SEG config, not the dataset config. The dataset
+    # config's 240x240x155 is the native BraTS grid, which SegResNet cannot take:
+    # 155 is not a multiple of 8, so the third decoder skip-add is 40 against 39.
+    # tumor_seg.json says 240x240x144 for exactly that reason, and before this it
+    # was read for epochs/lr only, so the crash was guaranteed.
+    seg_cfg = {}
+    if args.seg_config_path:
+        with open(args.seg_config_path) as f:
+            seg_cfg = json.load(f)
+    resolution = tuple(args.resolution or seg_cfg.get("resolution")
+                       or ds_cfg.get("resolution", [240, 240, 155]))
+    roi_size = tuple(args.roi_size or seg_cfg.get("roi_size", [128, 128, 128]))
+    if is_main:
+        print(f"  resolution    : {list(resolution)}", flush=True)
+        print(f"  roi_size      : {list(roi_size)}  (train crop = val window)", flush=True)
 
     train_ds = make_dataset(real_csv=args.train_csv, data_dir=args.data_dir,
-                            resolution=resolution,
+                            resolution=resolution, roi_size=roi_size, train=True,
                             synthetic_csv=args.synthetic_csv,
                             synthetic_dir=args.synthetic_dir,
                             real_limit=args.real_limit,
@@ -137,9 +150,20 @@ def main(args: argparse.Namespace) -> None:
             n += x.size(0)
         scheduler.step()
 
+        # Validation is decoupled from the epoch count because the data-scaling
+        # ablation has to hold OPTIMIZER STEPS fixed, not epochs: steps/epoch is
+        # n/(bs*gpus), so 200 epochs is 25,000 steps at n=1000 but only 2,400 at
+        # n=100, and a curve run that way measures undertraining as if it were data
+        # scarcity. Matching steps means ~1,250 epochs at n=100, and validating every
+        # one of those (126 volumes x 18 sliding windows, redundantly on all ranks)
+        # would cost far more than the training it is meant to monitor.
+        last_epoch = epoch == args.epochs - 1
+        if not (last_epoch or (epoch + 1) % args.val_every == 0):
+            continue
         metrics = evaluate(model.module if world_size > 1 else model, val_loader, device, roi_size)
         if is_main:
-            row = {"epoch": epoch, "train_loss": running / max(n, 1), **metrics}
+            row = {"epoch": epoch, "step": (epoch + 1) * len(train_loader),
+                   "train_loss": running / max(n, 1), **metrics}
             print(json.dumps(row), flush=True)
             with open(out_dir / "history.jsonl", "a") as f:
                 f.write(json.dumps(row) + "\n")
@@ -155,6 +179,8 @@ def main(args: argparse.Namespace) -> None:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--dataset_config_path", required=True)
+    p.add_argument("--seg_config_path", default=None,
+                   help="tumor_seg.json — source of resolution and roi_size.")
     p.add_argument("--train_csv", required=True)
     p.add_argument("--valid_csv", required=True)
     p.add_argument("--data_dir", required=True)
@@ -173,6 +199,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--num_workers", type=int, default=4)
     p.add_argument("--cache_rate", type=float, default=0.0)
     p.add_argument("--epochs", type=int, default=200)
+    p.add_argument("--val_every", type=int, default=1,
+                   help="Validate every N epochs (the last epoch always runs).")
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--weight_decay", type=float, default=1e-5)
     return p.parse_args()

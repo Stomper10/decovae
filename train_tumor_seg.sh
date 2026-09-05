@@ -95,6 +95,7 @@ srun --cpu-bind=none,v --accel-bind=g torchrun \
     --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
     -m downstream.train_tumor_seg \
       --dataset_config_path "${DATASET_CFG}" \
+      --seg_config_path "${SEG_CFG}" \
       --train_csv "${TRAIN_CSV}" \
       --valid_csv "${VALID_CSV}" \
       --data_dir "${DATA_DIR}" \
