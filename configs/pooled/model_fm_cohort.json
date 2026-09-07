@@ -160,14 +160,15 @@
         ],
         "num_res_blocks": 2,
         "use_flash_attention": true,
-        "conditioning_embedding_in_channels": 8,
+        "conditioning_embedding_in_channels": 4,
         "conditioning_embedding_num_channels": [
             8,
             32,
             64
         ],
         "resblock_updown": true,
-        "include_fc": true
+        "include_fc": true,
+        "_comment_cond_ch": "4, not MAISI's 8: binarize_labels one-hots the mask with num_mask_classes=4 (BraTS-GLI 2023 labels 0=bg,1=NCR,2=ED,3=ET), so the conditioning tensor has 4 channels. The inherited 8 fails at the first conv of the conditioning embedding."
     },
     "mask_generation_autoencoder_def": {
         "_target_": "monai.apps.generation.maisi.networks.autoencoderkl_maisi.AutoencoderKlMaisi",

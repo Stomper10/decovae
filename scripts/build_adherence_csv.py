@@ -8,6 +8,17 @@ Emits a ``rel_path`` + target-column CSV that ``downstream.attr_dataset`` /
         trainer: '{"healthy":0,"MCI":1,"AD":2}'.
   sex : every volume with a non-missing sex (drops brats, a few ixi/adni).
   age : every volume with a non-missing age (pooled brain-age regressor).
+  cohort : ukb / ixi / hcp / brats / adni / oasis — the A-config conditioning
+        vocabulary (model_fm_cohort.json), restricted to T1/T2/FLAIR for the same
+        reason modality is: the generator can never emit T1c, so scoring it would
+        measure a class that was never generated. label_map for the trainer:
+        '{"ukb":0,"ixi":1,"hcp":2,"brats":3,"adni":4,"oasis":5}'. Wildly unbalanced
+        (ukb 39,807 vs ixi 928, a 43x spread) — pass CLASS_WEIGHTED=1.
+        READ THE RESULT PER MODALITY. cohort and modality are confounded in this
+        corpus: T2 exists only in brats/hcp/ixi/oasis and FLAIR only in
+        adni/brats/ukb, so a classifier can score well by reading modality and
+        excluding cohorts it rules out. T1 is the ONLY slice carrying all six
+        cohorts, and is therefore the clean read for cohort adherence.
   modality : T1 / T2 / FLAIR only. T1c is EXCLUDED on purpose — brats_T1c is
         vae_only=1 and sits outside the diffusion conditioning vocabulary
         (model_fm.json modality vocab is exactly ["T1","T2","FLAIR"]), so a 4-way
@@ -38,7 +49,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--manifest", required=True, help="pooled_manifest_{train,valid}.csv")
     p.add_argument("--target", required=True,
-                   choices=["dx", "sex", "age", "modality"])
+                   choices=["dx", "sex", "age", "modality", "cohort"])
     p.add_argument("--out_csv", required=True)
     p.add_argument("--path_col", default="cache_key", choices=["cache_key", "src_path"])
     p.add_argument("--cohorts", default=None,
@@ -66,6 +77,10 @@ def main() -> None:
         df = df[df["sex"].notna()]
     elif args.target == "modality":
         df = df[df["modality"].isin(args.modality_labels.split(","))]
+    elif args.target == "cohort":
+        # Same modality restriction as the modality judge, and for the same
+        # reason: these are the classes the diffusion model can actually emit.
+        df = df[df["modality"].isin(args.modality_labels.split(","))]
     else:  # age
         df = df[df["age"].notna()]
 
@@ -85,9 +100,12 @@ def main() -> None:
 
     print(f"[build_adherence_csv] target={args.target} path_col={args.path_col} "
           f"cohorts={cohorts or 'all'} -> {args.out_csv} ({len(out)} rows)")
-    if args.target in ("dx", "sex", "modality"):
+    if args.target in ("dx", "sex", "modality", "cohort"):
         print("  class distribution:")
         print(out[args.target].value_counts().to_string())
+    if args.target == "cohort":
+        print("  cohort x modality (read the eval per modality — they are confounded):")
+        print(pd.crosstab(out["cohort"], out["modality"]).to_string())
     else:
         print(f"  age range: {out['age'].min():.1f}–{out['age'].max():.1f}  "
               f"mean {out['age'].mean():.1f}  n={len(out)}")

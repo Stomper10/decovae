@@ -71,6 +71,19 @@ def load_config():
     parser.add_argument("--no_amp", dest="amp", action="store_false")
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--wandb_entity", type=str, default=None)
+    # Pooled training needs latents and masks from DIFFERENT corpora: the latents
+    # are the pooled arm's embeddings, the masks are BraTS NIfTI. configs/pooled/
+    # dataset.json leaves data_dir and the label CSVs null because the pooled
+    # corpus has no segmentations, so they are supplied here instead of inventing
+    # a pooled-plus-masks dataset config. Left unset they fall back to the dataset
+    # config, which preserves the brats-only invocation exactly (cli_overrides
+    # drops None values).
+    parser.add_argument("--data_dir", type=str, default=None,
+                        help="Root the mask CSV's rel_path_seg is relative to.")
+    parser.add_argument("--train_label_dir", type=str, default=None,
+                        help="CSV with eid + rel_path_seg. Subjects absent from it "
+                             "are dropped, which is what restricts a pooled run to BraTS.")
+    parser.add_argument("--valid_label_dir", type=str, default=None)
     args = parser.parse_args()
 
     if args.resume and not args.run_name:
@@ -121,6 +134,27 @@ def binarize_labels(labels: torch.Tensor, num_classes: int) -> torch.Tensor:
     return one_hot.permute(0, -1, *range(1, labels.ndim)).contiguous()
 
 
+_MODALITY_SUFFIXES = ("T1c", "FLAIR", "T1", "T2")
+
+
+def _resolve_mask_key(stem: str, mask_lookup: dict[str, str]) -> str | None:
+    """Map an embedding stem onto a mask-CSV key, across both naming schemes."""
+    if stem in mask_lookup:
+        return stem
+    core = stem
+    for mod in _MODALITY_SUFFIXES:            # T1c before T1: longest match wins
+        if core.endswith("_" + mod):
+            core = core[: -len(mod) - 1]
+            break
+    if core in mask_lookup:
+        return core
+    if "_" in core:                           # drop the leading <cohort>_ token
+        tail = core.split("_", 1)[1]
+        if tail in mask_lookup:
+            return tail
+    return None
+
+
 def build_controlnet_file_list(filenames, embedding_base_dir, mask_dir,
                                 mask_lookup: dict[str, str], include_body_region: bool):
     """Extend train_UNET.build_file_list with a 'label' key for the mask path."""
@@ -130,10 +164,17 @@ def build_controlnet_file_list(filenames, embedding_base_dir, mask_dir,
         if not os.path.exists(emb_path):
             continue
         info_path = emb_path + ".json"
-        # Embedding file follows ``{subject_id}_emb.nii.gz``. Recover subject id
-        # via the stem and look up the BraTS mask path the CSV builder emitted.
-        subject_id = os.path.basename(fname).replace("_emb.nii.gz", "")
-        if subject_id not in mask_lookup:
+        # Embedding stems are named differently per corpus, and the mask CSV is
+        # always keyed on the bare BraTS eid:
+        #   brats-only  BraTS-GLI-00000-000_emb.nii.gz          -> stem == eid
+        #   pooled      brats_BraTS-GLI-00000-000_FLAIR_emb...  -> stem != eid
+        # Matching the stem alone silently drops EVERY pooled volume and trains on
+        # an empty set, so try the stem first and then the pooled decomposition
+        # <cohort>_<eid>_<MODALITY>. One mask serves all modalities of a subject,
+        # which is correct: the segmentation is defined on the subject, not the scan.
+        stem = os.path.basename(fname).replace("_emb.nii.gz", "")
+        subject_id = _resolve_mask_key(stem, mask_lookup)
+        if subject_id is None:
             continue
         mask_path = os.path.join(mask_dir, mask_lookup[subject_id])
         item = {"image": emb_path, "spacing": info_path, "cond": info_path,

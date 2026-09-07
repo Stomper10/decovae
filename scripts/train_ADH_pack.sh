@@ -20,6 +20,14 @@
 # That default came from the brain-age regressor. Modality is a 3-way call between
 # T1/T2/FLAIR, which differ in gross contrast, so it converges in a fraction of that.
 #
+# 56 CPUs. This was 112, sized for the four-judge run where ~5.4M volume reads put
+# the I/O floor near 6h. The pack skips completed judges on their sentinel, so a
+# resubmit now trains ONE judge and carries a quarter of that load; 56/(1 group x 4
+# gpus) still gives 14 loader workers per rank. It is also a queue decision: at 112
+# the only eligible hosts were node23/24 — node25 and node27 had 64 and 80 idle
+# cores — and the segmentation pack sat pending overnight for exactly that reason
+# (job 264416). Raise it back to 112 if all five judges are ever retrained at once.
+#
 # WALLTIME IS 24h, THE PARTITION MAXIMUM — not the 12h the single-target launchers
 # ask for, which was their own choice rather than a limit (gpu-4farm MaxTime is
 # 1-00:00:00, same as 8farm). It matters here because the four judges together read
@@ -28,17 +36,27 @@
 # margin, and train_attr_predictor.py has NO resume — an interrupted group restarts
 # from zero, so hitting the wall is expensive rather than merely slow.
 #
-# CLASS WEIGHTING IS NOT OPTIONAL for modality and dx. Modality train is
+# CLASS WEIGHTING IS NOT OPTIONAL for modality, dx and cohort. Modality train is
 # T1 26,146 / FLAIR 21,987 / T2 3,036 — an 8.6x imbalance. Unweighted, the classifier
 # can score well while abandoning T2 entirely, which is precisely the class whose
-# adherence we most need to measure.
+# adherence we most need to measure. Cohort is worse still, at 43x
+# (ukb 39,807 against ixi 928).
+#
+# COHORT IS THE A-CONFIG JUDGE, and it is the only way to ask whether the extra
+# conditioning variable was actually learned rather than ignored. Two things must
+# travel with its number. (1) Read it PER MODALITY: cohort and modality are
+# confounded here — T2 exists only in brats/hcp/ixi/oasis, FLAIR only in
+# adni/brats/ukb — so a classifier can score by reading modality and eliminating
+# cohorts, and T1 is the only slice carrying all six. (2) It has no B-config
+# counterpart: B never received cohort, so its cohort score is a floor, not a
+# baseline to beat.
 #SBATCH --job-name=adh_pack
 #SBATCH --account=gpu
 #SBATCH --partition=gpu-4farm
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:h100:4
-#SBATCH --cpus-per-task=112
+#SBATCH --cpus-per-task=56
 #SBATCH --time=1-00:00:00
 #SBATCH --requeue
 #SBATCH --signal=B:TERM@180
@@ -68,10 +86,12 @@ JUDGES=(
   "sex_clf:cls:30:{\"M\":0,\"F\":1}"
   "dx_clf:cls:60:{\"healthy\":0,\"MCI\":1,\"AD\":2}"
   "age_reg:reg:60:"
+  "cohort_clf:cls:40:{\"ukb\":0,\"ixi\":1,\"hcp\":2,\"brats\":3,\"adni\":4,\"oasis\":5}"
 )
 # Weighted losses for the imbalanced targets only; sex is near 50/50.
-declare -A CW=( [modality_clf]=1 [sex_clf]=0 [dx_clf]=1 )
-declare -A TGT=( [modality_clf]=modality [sex_clf]=sex [dx_clf]=dx [age_reg]=age )
+declare -A CW=( [modality_clf]=1 [sex_clf]=0 [dx_clf]=1 [cohort_clf]=1 )
+declare -A TGT=( [modality_clf]=modality [sex_clf]=sex [dx_clf]=dx [age_reg]=age \
+                 [cohort_clf]=cohort )
 
 BS="${BS:-4}"; LR="${LR:-1e-3}"; WD="${WD:-1e-4}"; DROPOUT="${DROPOUT:-0.5}"
 NG="${SLURM_GPUS_ON_NODE:-4}"

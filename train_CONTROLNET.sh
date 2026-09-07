@@ -50,6 +50,14 @@ source "${SCRIPT_DIR}/scripts/resolve_dataset.sh"
 # Required — script aborts inside python if unset/missing.
 : "${TRAINED_DIFFUSION_PATH:=}"
 
+# Mask source. Only needed when the latents and the masks come from different
+# corpora, which is the pooled case: DATASET=pooled supplies the embeddings, the
+# UNet and the conditioning vector, while the masks are BraTS NIfTI listed by a
+# BraTS CSV. Unset, everything falls back to the dataset config (brats-only).
+: "${MASK_DATA_DIR:=}"
+: "${TRAIN_LABEL_CSV:=}"
+: "${VALID_LABEL_CSV:=}"
+
 # ----------------------------------------------------------------------
 # Experiment directory tree + log
 # ----------------------------------------------------------------------
@@ -89,6 +97,8 @@ echo "  dataset_cfg          : ${DATASET_CFG}"
 echo "  model_cfg            : ${MODEL_CFG}"
 echo "  train_cfg            : ${TRAIN_CFG}"
 echo "  trained_diffusion_path: ${TRAINED_DIFFUSION_PATH}"
+echo "  mask_data_dir        : ${MASK_DATA_DIR:-<from dataset cfg>}"
+echo "  train_label_csv      : ${TRAIN_LABEL_CSV:-<from dataset cfg>}"
 echo "  output_dir           : ${OUTPUT_DIR_BASE}"
 echo "  exp_dir              : ${EXP_DIR}"
 echo "  exp_log              : ${EXP_LOG}"
@@ -141,6 +151,9 @@ srun --cpu-bind=none,v --accel-bind=g torchrun \
       --run_name "${EXP_NAME}" \
       --cpus_per_task "${SLURM_CPUS_PER_TASK}" \
       --trained_diffusion_path "${TRAINED_DIFFUSION_PATH}" \
+      ${MASK_DATA_DIR:+--data_dir "${MASK_DATA_DIR}"} \
+      ${TRAIN_LABEL_CSV:+--train_label_dir "${TRAIN_LABEL_CSV}"} \
+      ${VALID_LABEL_CSV:+--valid_label_dir "${VALID_LABEL_CSV}"} \
       ${RESUME_FLAG} &
 wait
 exit 0

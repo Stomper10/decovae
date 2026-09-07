@@ -1,0 +1,21 @@
+{
+    "_comment": "ControlNet (mask-conditional) training on the POOLED corpus. The UNet and the conditioning vector stay pooled; only the ControlNet is trained, and only on the volumes that carry a tumour mask. build_controlnet_file_list drops every subject absent from the mask CSV, so pointing this at the pooled embeddings with the BraTS seg CSV restricts training to BraTS (3,378 volumes = 1,126 subjects x T1/T2/FLAIR) without a separate corpus. One mask serves all modalities of a subject: the segmentation is defined on the subject, not the scan.",
+    "_comment_why": "brats gen inception FID is 75.8 (T1) against ukb_T1's 8.9, while brats RECONSTRUCTS better than the corpus average (PSNR 33.7-34.0 vs 32.2-32.4). The VAE handles tumours; the diffusion prior does not. BraTS is also the only cohort whose conditioning is nearly empty - sex, age and cdrsb are all missing for every volume, leaving modality + dx=tumor, i.e. one categorical bit to specify a tumour's location, size, shape and enhancement. This supplies the missing spatial variable.",
+    "controlnet_train": {
+        "batch_size": 2,
+        "cache_rate": 0.0,
+        "checkpointing_steps": 5000,
+        "gradient_accumulation_steps": 1,
+        "lr": 0.0001,
+        "max_train_steps": 50000,
+        "num_valid": 50,
+        "pretrained_steps": 0,
+        "report_to": true,
+        "seed": 42,
+        "val_batch_size": 2,
+        "validation_steps": 2500,
+        "num_mask_classes": 4,
+        "weighted_loss": 5.0,
+        "weighted_loss_label": [3]
+    }
+}
