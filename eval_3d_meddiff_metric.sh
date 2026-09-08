@@ -71,7 +71,12 @@ if [[ "${SPLIT}" == "test" ]]; then BASE_CSV_SRC="${TEST_CSV}"; else BASE_CSV_SR
 # different ruler than its comparators.
 : "${FID_MODEL_NAME:=imagenet_inception}"
 : "${FID_CENTER_SLICES_RATIO:=0.4}"
-: "${FID_BOOTSTRAP:=100}"
+: "${FID_BOOTSTRAP:=0}"   # 0 = off, matching compute_metric.sh:47 and therefore
+                        # matching results_triad_trajectory.csv, which our own three
+                        # arms were selected from. Turning it on here alone would give
+                        # the baseline error bars its comparators do not have, on a
+                        # trajectory whose whole purpose is to be overlaid on theirs.
+                        # If CIs are wanted, re-run BOTH sides with the same setting.
 NOCLAMP_ARG=""; [[ "${NO_CLAMP}" == "1" ]] && NOCLAMP_ARG="--no-clamp"
 # CELL (pooled): "cohort_modality" (e.g. adni_FLAIR) -> per-cohort×modality FID. Empty = whole-pooled FID.
 : "${CELL:=}"
