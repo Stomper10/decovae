@@ -57,6 +57,21 @@ if [[ "${SPLIT}" == "test" ]]; then BASE_CSV_SRC="${TEST_CSV}"; else BASE_CSV_SR
 : "${NORM_UPPER:=99.5}"
 # NO_CLAMP=1: save recon unclamped (MAISI/compute_metric convention; §11). All baselines MUST share this.
 : "${NO_CLAMP:=1}"
+
+# FID EXTRACTOR AND RATIO MUST BE PASSED EXPLICITLY. Until 2026-09-08 the rFID
+# call below omitted both, so compute_metric.py fell back to ITS defaults --
+# radimagenet_resnet50 at center_slices_ratio 1.0 -- and every 3DMD checkpoint
+# number in results_pooled_3dmd_ckpt_sweep.csv was produced that way. Both halves
+# of that default are disqualified for us: ratio 1.0 is quality-blind (it scored
+# 19.28 against 19.29 on models whose SSIM was 0.315 against 0.966) and
+# RadImageNet is reproducibly wrong on this corpus (14/14 cells, t = -11.76),
+# while Inception is the only extractor that tracks fidelity (rho +0.70 over 66
+# points). The triad trajectory our own arms were selected on used Inception at
+# ratio 0.4, so a 3DMD checkpoint chosen on the old numbers was picked with a
+# different ruler than its comparators.
+: "${FID_MODEL_NAME:=imagenet_inception}"
+: "${FID_CENTER_SLICES_RATIO:=0.4}"
+: "${FID_BOOTSTRAP:=100}"
 NOCLAMP_ARG=""; [[ "${NO_CLAMP}" == "1" ]] && NOCLAMP_ARG="--no-clamp"
 # CELL (pooled): "cohort_modality" (e.g. adni_FLAIR) -> per-cohort×modality FID. Empty = whole-pooled FID.
 : "${CELL:=}"
@@ -156,6 +171,9 @@ for AE_CKPT in ${AE_CKPTS}; do
               --num_images "${NUM_IMAGES}" \
               --base_label_dir "${BASE_CSV}" \
               --data_dir "${DATA_DIR}" \
+              --fid_model_name "${FID_MODEL_NAME}" \
+              --fid_center_slices_ratio "${FID_CENTER_SLICES_RATIO}" \
+              --fid_bootstrap "${FID_BOOTSTRAP}" \
               --feature_extractor_path "${FEATURE_EXTRACTOR_PATH}"
     else
         echo "  [SKIP] FEATURE_EXTRACTOR_PATH not set/found — LPIPS/PSNR/SSIM only (volumes kept in ${VOL_DIR})."
@@ -167,5 +185,6 @@ done
 echo ""
 echo "=== ALL CKPTS DONE @ $(date) ==="
 echo "  rFID per ckpt is logged above (search 'FID' / compute_metric output)."
-echo "  Collate into ${RESULTS_CSV} (schema = results_pooled_maisi_cells.csv) after picking the best ckpt."
+echo "  Collate into journal_plan/results_pooled_3dmd_trajectory.csv"
+echo "  (schema = results_triad_trajectory.csv, so 3DMD overlays our three arms directly)."
 exit 0
