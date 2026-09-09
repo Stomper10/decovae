@@ -1,0 +1,64 @@
+--- a/dataset/Singleres_dataset.py
++++ b/dataset/Singleres_dataset.py
+@@ -1,5 +1,19 @@
+ 
+ 
++# DecoVAE patch: read the Phase 3 latent cache, which is .npy.
++#
++# scripts/extract_3d_meddiff_latents.py writes one float32 .npy per subject, shape
++# [C=8, D, H, W], because the pooled corpus is itself a .npy cache and round-tripping
++# through NIfTI would cost a conversion pass over 52k volumes for nothing. Upstream
++# globs '*.nii.gz' and loads with torchio, so without this the dataset silently finds
++# zero files and __init__ raises on file_paths[0].
++#
++# Two upstream behaviours are kept deliberately:
++#   - the `_latents` suffix appended to each json value, so the json names the BASE
++#     directory and the latents live in <base>_latents;
++#   - the json KEY as the conditioning class index, which is what lets the pooled run
++#     condition on modality (0=T1, 1=T2, 2=FLAIR) and therefore be comparable to our
++#     per-modality gFID slices at all.
+ import numpy as np
+ import torch
+ from torch.utils.data.dataset import Dataset
+@@ -20,9 +34,12 @@
+             for key,value in dataroots.items():
+                 if not generate_latents:
+                     value = value+'_latents'
+-                file_paths =  glob.glob(value+'/*.nii.gz', recursive=True)
+-                if len(file_paths[0]) == 0:
+-                    raise FileNotFoundError(f"No .nii.gz files found in directory: {value}")
++                file_paths = (glob.glob(value + '/*.nii.gz', recursive=True)
++                              + glob.glob(value + '/*.npy', recursive=True))
++                # `len(file_paths[0]) == 0` upstream is an IndexError on an empty
++                # directory rather than the intended message; check the list itself.
++                if len(file_paths) == 0:
++                    raise FileNotFoundError(f"No .nii.gz/.npy latents in: {value}")
+                 for file_path in file_paths:
+                     self.all_files.append({key:file_path})
+ 
+@@ -37,13 +54,20 @@
+     def __getitem__(self, index):
+         if self.generate_latents:
+             file_path = list(self.all_files[index].items())[0][1]
+-            img = tio.ScalarImage(file_path)
+-            img_data = img.data.to(torch.float32)
++            if file_path.endswith('.npy'):
++                img_data = torch.from_numpy(np.load(file_path)).to(torch.float32)
++            else:
++                img_data = tio.ScalarImage(file_path).data.to(torch.float32)
+             imageout = img_data * 2 - 1
+             imageout = imageout.transpose(1,3).transpose(2,3)
+             return imageout, file_path
+         else:
+             cls_idx , file_path = list(self.all_files[index].items())[0][0] , list(self.all_files[index].items())[0][1]
+-            latent = tio.ScalarImage(file_path)
+-            latent = latent.data.to(torch.float32)
++            if file_path.endswith('.npy'):
++                # Already [C, D, H, W] float32 and already rescaled to [-1, 1] by
++                # extract_3d_meddiff_latents.py (codebook min/max), which is exactly
++                # what generate_training_latent.py hands the BiFlowNet upstream.
++                latent = torch.from_numpy(np.load(file_path)).to(torch.float32)
++            else:
++                latent = tio.ScalarImage(file_path).data.to(torch.float32)
+             return latent, torch.tensor(int(cls_idx)), torch.tensor(self.resolution)/64.0
+\ No newline at end of file
