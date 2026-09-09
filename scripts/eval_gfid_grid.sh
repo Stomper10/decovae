@@ -41,6 +41,8 @@ VAE_CKPT="${VAE_CKPT:-checkpoint-320000}"   # MUST be the ckpt the latents came 
 UNET_CKPT="${UNET_CKPT:-checkpoint-250000}"
 GUIDANCE="${GUIDANCE:-1.0}"
 GUIDANCE_SET="${GUIDANCE_SET:-1.0 1.5 2.0 3.0}"
+GUIDANCE_SLICES="${GUIDANCE_SLICES:-all_T1}"
+N_GUIDANCE="${N_GUIDANCE:-500}"
 FID_R="${FID_R:-0.4}"
 BOOT="${BOOT:-100}"
 CONTENT_FRAC="${CONTENT_FRAC:-0.15}"
@@ -130,8 +132,25 @@ case "${MODE}" in
     ;;
   guidance)
     # g is a WITHIN-arm comparison against a fixed reference, so n=500 is enough
-    # here even though the cross-arm ranking needs 2500. all_T1 = the richest slice.
-    for arm in ${ARMS}; do for g in ${GUIDANCE_SET}; do row "${arm}" all_T1 500 "${g}"; done; done
+    # here even though the cross-arm ranking needs 2500.
+    #
+    # GUIDANCE_SLICES defaults to all_T1 for backward compatibility with the sweep
+    # that fixed g*=3.0, but that sweep is the reason this is now overridable: it ran
+    # on all_T1 ONLY and the value was then applied to all three modalities. Two
+    # things in its own output argue against that. The per-arm optima differ --
+    # inception FID puts maisi at g=2.0 (13.78), vad at g=1.0 (11.56) and sid still
+    # descending at the swept edge g=3.0 (11.92) -- so every arm was reported away
+    # from its own optimum, sid furthest. And T1 has 26,146 training volumes against
+    # T2's 3,036, so there is no reason the strength that suits the richest slice
+    # suits the scarcest.
+    #
+    #   GUIDANCE_SLICES="all_T2" GUIDANCE_SET="1.0 1.5 2.0 3.0 5.0" \
+    #     MODE=guidance bash scripts/eval_gfid_grid.sh
+    for arm in ${ARMS}; do
+      for sl in ${GUIDANCE_SLICES}; do
+        for g in ${GUIDANCE_SET}; do row "${arm}" "${sl}" "${N_GUIDANCE}" "${g}"; done
+      done
+    done
     ;;
   main)
     for arm in ${ARMS}; do
