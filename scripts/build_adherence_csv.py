@@ -106,7 +106,12 @@ def main() -> None:
     if args.target == "cohort":
         print("  cohort x modality (read the eval per modality — they are confounded):")
         print(pd.crosstab(out["cohort"], out["modality"]).to_string())
-    else:
+    # Guard on the column, not on the target. `age` is emitted only when it IS the
+    # target -- the cols dict carries rel_path, the target, cohort and modality and
+    # nothing else -- so an `else` here crashed every dx/sex/modality build. It was
+    # introduced with the cohort branch and hid because the CSV is written before this
+    # line, so the file looked fine while the script exited non-zero.
+    if "age" in out.columns:
         print(f"  age range: {out['age'].min():.1f}–{out['age'].max():.1f}  "
               f"mean {out['age'].mean():.1f}  n={len(out)}")
 

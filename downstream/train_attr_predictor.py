@@ -168,6 +168,26 @@ def main(args: argparse.Namespace) -> None:
                             "val_acc": metrics["acc"]},
                            ckpt_dir / "best.pt")
 
+    # ---- final: score the SELECTED checkpoint on the held-out test set ----
+    if args.test_csv and is_main:
+        import copy
+        test_ds = make_attr_dataset(real_csv=args.test_csv, data_dir=args.data_dir,
+                                    resolution=resolution, target_col=args.target,
+                                    task="cls", label_map=label_map,
+                                    orientation_axcodes=axcodes,
+                                    cache_rate=args.cache_rate)
+        test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False,
+                                 num_workers=args.num_workers, pin_memory=True)
+        best = torch.load(ckpt_dir / "best.pt", map_location="cpu", weights_only=False)
+        eval_model = copy.deepcopy(model.module if world_size > 1 else model)
+        eval_model.load_state_dict(best["model"])
+        eval_model.eval().to(device)
+        tm = evaluate(eval_model, test_loader, device, num_classes)
+        row = {"split": "test", "from_epoch": best["epoch"], **tm}
+        print(json.dumps(row), flush=True)
+        with open(out_dir / "test_metrics.json", "w") as f:
+            json.dump(row, f, indent=2)
+
     _cleanup_ddp()
 
 
@@ -176,6 +196,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--dataset_config_path", required=True)
     p.add_argument("--train_csv", required=True)
     p.add_argument("--valid_csv", required=True)
+    p.add_argument("--test_csv", default=None,
+                   help="Held-out test set. Selection stays on valid; this is scored "
+                        "ONCE at the end with the selected best.pt. Plan section 6 "
+                        "requires the downstream numbers to come from a held-out real "
+                        "test because generation is conditioned on the same attribute "
+                        "the predictor reads back -- scoring on the split that chose "
+                        "the checkpoint would close that loop.")
     p.add_argument("--data_dir", required=True)
     p.add_argument("--output_dir", required=True)
     p.add_argument("--run_name", required=True)
