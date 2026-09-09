@@ -38,8 +38,21 @@ model:
   resume_from_checkpoint:        # stage2's OWN ckpt (requeue); empty on first launch — launcher auto-injects
   # converged stage1 = global_step 82,416 (rFID-best, 2026-06-16 sweep). This is
   # a rolling val-best slot (latest_checkpoint.ckpt) — pin a copy if stage1 ever reruns.
-  init_weights_from: /data/wonyoungjang/decodata/3d_meddiff/pooled/my_model/version_0/checkpoints/latest_checkpoint.ckpt
-  max_steps: 1000000
+  # step 100,000, the val-best of the corrected sweep (2026-09-09,
+  # results_pooled_3dmd_trajectory.csv). FID_inc 4.681 and LPIPS 0.0243 both peak
+  # here and PSNR is within 0.02 dB of its own best at 80k, so all three agree on
+  # one point -- unlike the previous sweep, where 82k/94k/102k were indistinguishable.
+  # NOT latest_checkpoint.ckpt, which this line used to point at: that is a rolling
+  # val-best slot (overwritten if stage1 ever reruns) holding step 82,416, and it was
+  # selected on RadImageNet at center_slices_ratio 1.0 -- a combination we do not
+  # quote, and a different ruler from the Inception r=0.4 our own arms were chosen on.
+  init_weights_from: /data/wonyoungjang/decodata/3d_meddiff/pooled/my_model/version_0/checkpoints/epoch=245-step=100000-10000-train/recon_loss=0.13.ckpt
+  # 40,000, matching our own DFT budget, NOT upstream's 1,000,000. 3DMD's "stage2"
+  # is a DECODER fine-tune with the encoder frozen (AE_finetuning freezes encoder,
+  # pre_vq_conv and codebook -- PatchVolume.py:702), so it is the analog of our
+  # train_DFT.py, not of our stage1->stage2 patch curriculum. Plan section 2 fixed
+  # the rule: match Phase 2 to our DFT rather than to upstream.
+  max_steps: 40000
   max_epochs: 10000
   precision: bf16
 

@@ -155,8 +155,7 @@
             64
         ],
         "resblock_updown": true,
-        "include_fc": true,
-        "_comment_cond_ch": "4, not MAISI's 8: binarize_labels one-hots the mask with num_mask_classes=4 (BraTS-GLI 2023 labels 0=bg,1=NCR,2=ED,3=ET), so the conditioning tensor has 4 channels. The inherited 8 fails at the first conv of the conditioning embedding."
+        "include_fc": true
     },
     "mask_generation_autoencoder_def": {
         "_target_": "monai.apps.generation.maisi.networks.autoencoderkl_maisi.AutoencoderKlMaisi",
@@ -235,5 +234,6 @@
         "beta_end": 0.0195,
         "schedule": "scaled_linear_beta",
         "clip_sample": false
-    }
+    },
+    "_comment_controlnet_def": "conditioning_embedding_in_channels is 4, not MAISI's inherited 8: train_CONTROLNET.binarize_labels one-hots the mask with num_mask_classes=4 (BraTS-GLI 2023 labels 0=bg, 1=NCR, 2=ED, 3=ET), so the conditioning tensor has 4 channels and 8 fails at the first conv of the conditioning embedding. Keep this note OUTSIDE controlnet_def - every key inside that block is forwarded to ControlNetMaisi.__init__."
 }
