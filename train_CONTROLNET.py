@@ -80,6 +80,11 @@ def load_config():
     # drops None values).
     parser.add_argument("--data_dir", type=str, default=None,
                         help="Root the mask CSV's rel_path_seg is relative to.")
+    parser.add_argument("--mask_dir", type=str, default=None,
+                        help="Pooled-space masks from scripts/build_controlnet_masks.py "
+                             "(<cache_key>_seg.npy, 192^3). REQUIRED for pooled latents: the "
+                             "native rel_path_seg masks are in a different frame from the cache "
+                             "the latents were encoded from. The CSV still decides membership.")
     parser.add_argument("--train_label_dir", type=str, default=None,
                         help="CSV with eid + rel_path_seg. Subjects absent from it "
                              "are dropped, which is what restricts a pooled run to BraTS.")
@@ -119,6 +124,22 @@ signal.signal(signal.SIGINT, graceful_shutdown)
 # ---------------------------------------------------------------------------
 # Mask handling
 # ---------------------------------------------------------------------------
+def _mask_at_image_res(labels: torch.Tensor, latents: torch.Tensor) -> torch.Tensor:
+    """The mask the ControlNet conditions on, at IMAGE resolution (latent x 4).
+
+    ControlNetMaisi's conditioning embedding downsamples by 4 (two stride-2 convs,
+    conditioning_embedding_num_channels [8, 32, 64]) before adding to the first
+    latent-grid features. Feeding the mask at the latent grid (48^3) came out 12^3
+    and killed job 266858 at `h += controlnet_cond`. Pooled masks are already
+    192^3 in the cache frame, so they pass through; anything else is resized with
+    nearest, which only fixes SIZE -- position must come from the mask builder.
+    """
+    target = tuple(4 * int(s) for s in latents.shape[2:])
+    if tuple(labels.shape[2:]) != target:
+        labels = F.interpolate(labels.float(), size=target, mode="nearest")
+    return labels
+
+
 def binarize_labels(labels: torch.Tensor, num_classes: int) -> torch.Tensor:
     """Multi-channel binary encoding of a multi-class integer mask.
 
@@ -156,7 +177,8 @@ def _resolve_mask_key(stem: str, mask_lookup: dict[str, str]) -> str | None:
 
 
 def build_controlnet_file_list(filenames, embedding_base_dir, mask_dir,
-                                mask_lookup: dict[str, str], include_body_region: bool):
+                                mask_lookup: dict[str, str], include_body_region: bool,
+                                mask_npy_dir: str | None = None):
     """Extend train_UNET.build_file_list with a 'label' key for the mask path."""
     files = []
     for fname in filenames:
@@ -176,7 +198,14 @@ def build_controlnet_file_list(filenames, embedding_base_dir, mask_dir,
         subject_id = _resolve_mask_key(stem, mask_lookup)
         if subject_id is None:
             continue
-        mask_path = os.path.join(mask_dir, mask_lookup[subject_id])
+        if mask_npy_dir:
+            # Per (subject, modality): <cache_key>_seg.npy, where the embedding stem
+            # is the cache_key basename. Missing file -> the volume is left out.
+            mask_path = os.path.join(mask_npy_dir, stem.split("_", 1)[0], f"{stem}_seg.npy")
+            if not os.path.isfile(mask_path):
+                continue
+        else:
+            mask_path = os.path.join(mask_dir, mask_lookup[subject_id])
         item = {"image": emb_path, "spacing": info_path, "cond": info_path,
                 "label": mask_path}
         if include_body_region:
@@ -187,7 +216,7 @@ def build_controlnet_file_list(filenames, embedding_base_dir, mask_dir,
 
 
 def prepare_controlnet_transform(include_body_region: bool = False, cond_attributes=None,
-                                 include_spacing: bool = True) -> Compose:
+                                 include_spacing: bool = True, npy_masks: bool = False) -> Compose:
     """train_UNET.prepare_transform + extra LoadImaged on the 'label' (mask).
 
     cond_attributes / include_spacing MUST be forwarded. Without them
@@ -200,10 +229,16 @@ def prepare_controlnet_transform(include_body_region: bool = False, cond_attribu
                              cond_attributes=cond_attributes,
                              include_spacing=include_spacing)
     # Compose chains the existing transforms; just append mask-loading ops.
-    extra = [
-        monai.transforms.LoadImaged(keys=["label"]),
-        monai.transforms.EnsureChannelFirstd(keys=["label"]),
-    ]
+    if npy_masks:
+        extra = [
+            monai.transforms.LoadImaged(keys=["label"], reader="NumpyReader"),
+            monai.transforms.EnsureChannelFirstd(keys=["label"], channel_dim="no_channel"),
+        ]
+    else:
+        extra = [
+            monai.transforms.LoadImaged(keys=["label"]),
+            monai.transforms.EnsureChannelFirstd(keys=["label"]),
+        ]
     return Compose(list(base.transforms) + extra)
 
 
@@ -325,10 +360,10 @@ def main():
 
     train_files = build_controlnet_file_list(filenames_train, embedding_base_dir,
                                               args.data_dir, mask_lookup_train,
-                                              include_body_region)
+                                              include_body_region, mask_npy_dir=args.mask_dir)
     valid_files = build_controlnet_file_list(filenames_valid, embedding_base_dir,
                                               args.data_dir, mask_lookup_valid,
-                                              include_body_region)
+                                              include_body_region, mask_npy_dir=args.mask_dir)
     # Evenly spaced, not a head slice: the matched list is modality-blocked
     # (126 T1, then T2, then FLAIR), so [:num_valid] is all T1 and best-checkpoint
     # would be picked on one modality. A fixed stride keeps it deterministic.
@@ -345,6 +380,7 @@ def main():
         include_body_region=include_body_region,
         cond_attributes=cond_cfg["attributes"] if use_token_set else None,
         include_spacing=include_spacing,
+        npy_masks=bool(args.mask_dir),
     )
 
     workers_per_gpu = args.cpus_per_task // world_size
@@ -439,8 +475,7 @@ def main():
         # 1× passthrough → channel expansion.
         # TODO: if conditioning_embedding has non-trivial downsample
         # (currently in MAISI ControlNet it does), set size=latent_shape * ratio.
-        labels_resized = F.interpolate(labels, size=images.shape[2:], mode="nearest")
-        controlnet_cond = binarize_labels(labels_resized, num_classes=num_mask_classes)
+        controlnet_cond = binarize_labels(_mask_at_image_res(labels, images), num_classes=num_mask_classes)
 
         with autocast(device_type="cuda", dtype=torch.float16, enabled=args.amp):
             noise = torch.randn_like(images)
@@ -548,8 +583,7 @@ def main():
                     v_labels = vb["label"].to(device, non_blocking=True)
                     v_spacing = vb["spacing"].to(device, non_blocking=True) if include_spacing else None
                     v_meta = _meta_from_batch(vb, use_token_set, device)
-                    v_labels_r = F.interpolate(v_labels, size=v_images.shape[2:], mode="nearest")
-                    v_cond = binarize_labels(v_labels_r, num_classes=num_mask_classes)
+                    v_cond = binarize_labels(_mask_at_image_res(v_labels, v_images), num_classes=num_mask_classes)
                     with autocast(device_type="cuda", dtype=torch.float16, enabled=args.amp):
                         v_noise = torch.randn_like(v_images)
                         v_t = torch.randint(0, num_train_timesteps, (v_images.shape[0],),

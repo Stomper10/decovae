@@ -57,6 +57,13 @@ source "${SCRIPT_DIR}/scripts/resolve_dataset.sh"
 : "${MASK_DATA_DIR:=}"
 : "${TRAIN_LABEL_CSV:=}"
 : "${VALID_LABEL_CSV:=}"
+# Pooled-space masks (scripts/build_controlnet_masks.sh). Required for DATASET=pooled:
+# the native masks under MASK_DATA_DIR are in a different frame from the latents.
+: "${MASK_NPY_DIR:=}"
+if [[ "${DATASET}" == "pooled" && -z "${MASK_NPY_DIR}" ]]; then
+    echo "[FATAL] DATASET=pooled needs MASK_NPY_DIR (pooled-space masks); native masks would be misaligned" >&2
+    exit 1
+fi
 
 # ----------------------------------------------------------------------
 # Experiment directory tree + log
@@ -99,6 +106,7 @@ echo "  train_cfg            : ${TRAIN_CFG}"
 echo "  trained_diffusion_path: ${TRAINED_DIFFUSION_PATH}"
 echo "  mask_data_dir        : ${MASK_DATA_DIR:-<from dataset cfg>}"
 echo "  train_label_csv      : ${TRAIN_LABEL_CSV:-<from dataset cfg>}"
+echo "  mask_npy_dir         : ${MASK_NPY_DIR:-<none: native masks>}"
 echo "  output_dir           : ${OUTPUT_DIR_BASE}"
 echo "  exp_dir              : ${EXP_DIR}"
 echo "  exp_log              : ${EXP_LOG}"
@@ -154,6 +162,7 @@ srun --cpu-bind=none,v --accel-bind=g torchrun \
       ${MASK_DATA_DIR:+--data_dir "${MASK_DATA_DIR}"} \
       ${TRAIN_LABEL_CSV:+--train_label_dir "${TRAIN_LABEL_CSV}"} \
       ${VALID_LABEL_CSV:+--valid_label_dir "${VALID_LABEL_CSV}"} \
+      ${MASK_NPY_DIR:+--mask_dir "${MASK_NPY_DIR}"} \
       ${RESUME_FLAG} &
 wait
 exit 0
