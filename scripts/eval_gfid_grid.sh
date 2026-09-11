@@ -190,11 +190,34 @@ case "${MODE}" in
       for s in ${CELL_SLICES}; do row "${arm}" "${s}" "${N_CELL}" "${GUIDANCE}"; done
     done
     ;;
+  controlnet)
+    # Mask-conditional BraTS generation (ControlNet), for the BraTS-return decision.
+    # Same BASE_CSV, n, seed and guidance as the plain brats_* cells, so every volume
+    # is generated from the SAME condition as its counterpart there (the draw is a
+    # numpy RNG and reproduces on any machine). The initial noise uses the same torch
+    # seed, but CUDA RNG streams are not guaranteed identical across GPU models, so a
+    # plain run made on another cluster is paired by condition, not by noise.
+    # Only OUT_TAG differs, which compute_metric.sh requires for a ControlNet run.
+    #
+    #   EXTS=inception MODEL_CFG=configs/pooled/model_fm_cohort.json \
+    #   ARMS=pooled-vad-cov1var1-kl8e4-eff32-s1-Acfg GUIDANCE=3.0 \
+    #   CONTROLNET_CKPT=<run>/weights/controlnet/best-checkpoint \
+    #   MASK_NPY_DIR=/data/wonyoungjang/decodata/pooled/controlnet_masks \
+    #   MODE=controlnet bash scripts/eval_gfid_grid.sh
+    : "${CONTROLNET_CKPT:?set CONTROLNET_CKPT (train_CONTROLNET.py checkpoint)}"
+    : "${MASK_NPY_DIR:?set MASK_NPY_DIR (pooled-space masks)}"
+    for arm in ${ARMS}; do
+      for s in ${CN_SLICES:-brats_T1 brats_T2 brats_FLAIR}; do
+        row "${arm}" "${s}" "${N_CELL}" "${GUIDANCE}" \
+            CONTROLNET_CKPT="${CONTROLNET_CKPT}" MASK_NPY_DIR="${MASK_NPY_DIR}" OUT_TAG="cn_${s}"
+      done
+    done
+    ;;
   null)
     for s in ${MOD_SLICES};  do null_row "${s}" "${N_MOD}";  done
     for s in ${CELL_SLICES}; do null_row "${s}" "${N_CELL}"; done
     ;;
-  *) echo "unknown MODE=${MODE} (probe|guidance|main|null)" >&2; exit 1;;
+  *) echo "unknown MODE=${MODE} (probe|guidance|main|controlnet|null)" >&2; exit 1;;
 esac
 
 echo

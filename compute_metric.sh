@@ -121,6 +121,16 @@ WOODLAND_ARG=""; [[ "${FID_WOODLAND}" == "1" ]] && WOODLAND_ARG="--fid_woodland"
 # A guidance sweep reuses the same EXP_NAME, so g!=1.0 namespaces its outputs by a
 # 'g<scale>' tag (e.g. g20) to avoid clobbering across scales.
 : "${GUIDANCE_SCALE:=1.0}"
+# Mask-conditional generation (real_vs_gen): CONTROLNET_CKPT = a train_CONTROLNET.py
+# checkpoint (model.pt or its dir), MASK_NPY_DIR = pooled-space masks. Needs an OUT_TAG
+# of its own: without one the output dir is the same cells/<slice>_g<g> the plain
+# generation used, and the two runs would score each other's volumes.
+: "${CONTROLNET_CKPT:=}"
+: "${MASK_NPY_DIR:=}"
+if [[ -n "${CONTROLNET_CKPT}" && -z "${OUT_TAG:-}" ]]; then
+    echo "[FATAL] CONTROLNET_CKPT is set but OUT_TAG is empty; give the mask-conditional run its own OUT_TAG" >&2
+    exit 1
+fi
 
 # ----------------------------------------------------------------------
 # Experiment directory tree + log
@@ -201,6 +211,7 @@ echo "  POSTFIX    : ${POSTFIX}"
 echo "  SPLIT      : ${SPLIT}  (base_csv=${BASE_CSV})"
 echo "  CELL       : ${CELL:-<none>}"
 echo "  GUIDANCE   : ${GUIDANCE_SCALE} (tag=${GTAG:-<none>})"
+echo "  CONTROLNET : ${CONTROLNET_CKPT:-<none>}  masks=${MASK_NPY_DIR:-<none>}"
 echo "  EXP_DIR    : ${EXP_DIR}"
 echo "  EXP_LOG    : ${EXP_LOG}"
 echo "  master     : ${MASTER_ADDR}:${MASTER_PORT}"
@@ -282,6 +293,8 @@ srun --cpu-bind=none,v --accel-bind=g torchrun \
       --postfix "${POSTFIX}" \
       --seed "${SEED}" \
       --guidance_scale "${GUIDANCE_SCALE}" \
+      ${CONTROLNET_CKPT:+--controlnet_path "${CONTROLNET_CKPT}"} \
+      ${MASK_NPY_DIR:+--mask_dir "${MASK_NPY_DIR}"} \
       --fid_bootstrap "${FID_BOOTSTRAP}" \
       --base_label_dir "${BASE_CSV}" \
       --other_label_dir "${OTHER_CSV}" \

@@ -119,6 +119,15 @@ def load_config():
                              "the training whole-set drop) and combines: "
                              "out = null + g*(cond - null). Only used when conditioning "
                              "is enabled; ignored for the legacy scalar-meta path.")
+    parser.add_argument("--controlnet_path", type=str, default=None,
+                        help="real_vs_gen only: mask-conditional generation. A train_CONTROLNET.py "
+                             "checkpoint (model.pt, or the directory holding it). Each generated "
+                             "volume is conditioned on the tumour mask of the SAME row its token "
+                             "set was drawn from, so condition and mask always belong together.")
+    parser.add_argument("--mask_dir", type=str, default=None,
+                        help="Pooled-space masks, <cache_key>_seg.npy (scripts/build_controlnet_masks.py). "
+                             "Required with --controlnet_path.")
+    parser.add_argument("--num_mask_classes", type=int, default=4)
 
     # Generation phase
     parser.add_argument("--base_label_dir", type=str, default=None)
@@ -308,7 +317,7 @@ def build_transforms(weight_dtype, args):
 
 
 def load_models(args, device):
-    autoencoder, unet, noise_scheduler, loss_perceptual = None, None, None, None
+    autoencoder, unet, noise_scheduler, loss_perceptual, controlnet = None, None, None, None, None
     scale_factor, global_mean = 1.0, 0.0
 
     if args.eval_mode in ["real_vs_recon", "real_vs_gen"]:
@@ -333,16 +342,24 @@ def load_models(args, device):
         unet.eval()
         scale_factor = args.scale_factor
         global_mean = args.global_mean
+        if getattr(args, "controlnet_path", None):
+            cn_fp = args.controlnet_path
+            if os.path.isdir(cn_fp):
+                cn_fp = os.path.join(cn_fp, "model.pt")
+            controlnet = define_instance(args, "controlnet_def").to(device)
+            cn_ckpt = torch.load(cn_fp, map_location=device, weights_only=False)
+            controlnet.load_state_dict(cn_ckpt["controlnet"], strict=True)
+            controlnet.eval()
 
     if args.eval_mode == "real_vs_recon":
         loss_perceptual = PerceptualLoss(spatial_dims=3, network_type="squeeze",
                                          is_fake_3d=True, fake_3d_ratio=0.2).eval().to(device)
 
-    return autoencoder, unet, noise_scheduler, loss_perceptual, scale_factor, global_mean
+    return autoencoder, unet, noise_scheduler, loss_perceptual, scale_factor, global_mean, controlnet
 
 
 def load_data_lists(args, adapter):
-    base_files, other_files, meta_values = [], [], []
+    base_files, other_files, meta_values, cond_keys = [], [], [], None
 
     if args.eval_mode in ["real_vs_real", "real_vs_recon"] or \
        (args.eval_mode == "real_vs_gen" and args.save_real):
@@ -364,13 +381,17 @@ def load_data_lists(args, adapter):
             rng = np.random.default_rng(args.seed)
             idx = rng.integers(0, len(df), args.num_images)
             meta_values = [adapter.derive_conditions(df.iloc[int(j)]) for j in idx]
+            # The row each condition came from, so mask-conditional generation can pair
+            # the token set with that same volume's tumour mask.
+            if "cache_key" in df.columns:
+                cond_keys = [str(df.iloc[int(j)]["cache_key"]) for j in idx]
         else:
             meta_values = adapter.meta_value_distribution(args.num_images, args.seed)
             if meta_values is None:
                 np.random.seed(args.seed)
                 meta_values = np.random.uniform(0.0, 1.0, args.num_images)
 
-    return base_files, other_files, meta_values
+    return base_files, other_files, meta_values, cond_keys
 
 
 def run_generation(args, paths, device, local_rank, world_size):
@@ -395,10 +416,16 @@ def run_generation(args, paths, device, local_rank, world_size):
         logger.info(f"[gen] conditioning ON | guidance_scale={guidance_scale} "
                     f"| CFG={'on' if use_cfg else 'off'} | null=modality-only(keep_idx={cfg_keep_idx})")
     transform, gen_transform, slice_transform = build_transforms(weight_dtype, args)
-    autoencoder, unet, noise_scheduler, loss_perceptual, scale_factor, global_mean = \
+    autoencoder, unet, noise_scheduler, loss_perceptual, scale_factor, global_mean, controlnet = \
         load_models(args, device)
 
-    base_files, other_files, meta_values = load_data_lists(args, adapter)
+    base_files, other_files, meta_values, cond_keys = load_data_lists(args, adapter)
+    if controlnet is not None:
+        if not (use_token_set and cond_keys and args.mask_dir):
+            raise ValueError("--controlnet_path needs token-set conditioning, a BASE_CSV with a "
+                             "cache_key column, and --mask_dir")
+        if local_rank == 0:
+            logger.info(f"[gen] ControlNet ON | ckpt={args.controlnet_path} | masks={args.mask_dir}")
 
     all_idx = list(range(args.num_images))
     my_indices = monai.data.partition_dataset(
@@ -541,6 +568,20 @@ def run_generation(args, paths, device, local_rank, world_size):
                 else:
                     meta_tensor = torch.tensor([[meta_values[i]]], device=device, dtype=weight_dtype)
 
+                controlnet_cond = None
+                if controlnet is not None:
+                    mask_fp = os.path.join(args.mask_dir, f"{cond_keys[i]}_seg.npy")
+                    if not os.path.isfile(mask_fp):
+                        # Fail rather than fall back to unconditioned generation: a silently
+                        # mask-less volume would enter the "with ControlNet" FID.
+                        raise FileNotFoundError(f"no pooled mask for drawn row {cond_keys[i]}: {mask_fp}")
+                    m = torch.from_numpy(np.load(mask_fp).astype(np.int64))[None]
+                    want = tuple(4 * int(d) for d in args.latent_shape)
+                    if tuple(m.shape[1:]) != want:
+                        raise ValueError(f"mask {tuple(m.shape[1:])} != image resolution {want} (latent x 4)")
+                    controlnet_cond = torch.nn.functional.one_hot(m, num_classes=args.num_mask_classes) \
+                        .permute(0, 4, 1, 2, 3).to(device, dtype=weight_dtype)
+
                 all_timesteps = noise_scheduler.timesteps
                 all_next_timesteps = torch.cat((all_timesteps[1:],
                                                 torch.tensor([0], dtype=all_timesteps.dtype)))
@@ -553,6 +594,14 @@ def run_generation(args, paths, device, local_rank, world_size):
                             "spacing_tensor": spacing_tensor,
                             "meta_tensor": meta_tensor,
                         }
+                        if controlnet_cond is not None:
+                            # Residuals ride in unet_inputs, so the CFG null pass below gets
+                            # them too: the mask is spatial conditioning, not part of the
+                            # token set that guidance drops (as in MAISI's ControlNet inference).
+                            down_res, mid_res = controlnet(x=latent, timesteps=unet_inputs["timesteps"],
+                                                           controlnet_cond=controlnet_cond)
+                            unet_inputs["down_block_additional_residuals"] = down_res
+                            unet_inputs["mid_block_additional_residual"] = mid_res
                         model_output = unet(**unet_inputs)
                         if use_cfg:
                             # second pass with the modality-only null conditioning,
@@ -584,6 +633,8 @@ def run_generation(args, paths, device, local_rank, world_size):
                                               else str(v)))
                                          for k, v in dict(cond_raw).items()}
                             cond_json["guidance_scale"] = guidance_scale
+                            if controlnet is not None:
+                                cond_json["mask_cache_key"] = cond_keys[i]
                             with open(expected_nii_path.replace(".nii.gz", ".cond.json"), "w") as cf:
                                 json.dump(cond_json, cf)
 
