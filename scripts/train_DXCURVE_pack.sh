@@ -68,6 +68,9 @@ SIZES="${SIZES:-250 500 1000 2500 full}"
 # ~10,850 steps. 12,000 clears that knee with margin, and the smaller-n points overfit
 # sooner so it covers them too.
 TARGET_STEPS="${TARGET_STEPS:-12000}"
+# Validate every VAL_STEPS, not every epoch: n=250 is 15 steps/epoch = 800 epochs, and
+# scoring the 689 validation volumes after each would cost more than the training.
+VAL_STEPS="${VAL_STEPS:-1000}"
 LABEL_MAP='{"healthy":0,"MCI":1,"AD":2}'
 BS="${BS:-4}"; LR="${LR:-1e-3}"; WD="${WD:-1e-4}"; DROPOUT="${DROPOUT:-0.5}"
 NG="${SLURM_GPUS_ON_NODE:-4}"
@@ -105,8 +108,9 @@ for n in ${SIZES}; do
   exp="${OUT}/${name}"
   # Skip on a COMPLETION sentinel, never on best.pt: best.pt appears after the first
   # epoch that improves, so keying the skip on it would let a walltime resubmit mark a
-  # part-trained point "done". train_attr_predictor.py has no resume, so an interrupted
-  # point must restart -- the sentinel is what forces that.
+  # part-trained point "done". train_attr_predictor.py resumes from weights/last.pt
+  # (added 2026-09-11), so an interrupted point continues from its last full epoch;
+  # the sentinel still decides what counts as finished.
   if [[ -f "${exp}/weights/.dxcurve_done" ]]; then
     echo "[${name}] sentinel present — skipping"; continue
   fi
@@ -115,7 +119,8 @@ for n in ${SIZES}; do
   n_tr=$(( $(wc -l < "${tr}") - 1 ))
   spe=$(( n_tr / (BS * NG) )); [[ "${spe}" -lt 1 ]] && spe=1
   ep=$(( TARGET_STEPS / spe )); [[ "${ep}" -lt 1 ]] && ep=1
-  echo "[${name}] n=${n_tr}  ${spe} steps/ep  epochs=${ep}  (=$(( spe * ep )) steps)  @ $(date)"
+  ve=$(( (VAL_STEPS + spe - 1) / spe )); [[ "${ve}" -gt "${ep}" ]] && ve=${ep}
+  echo "[${name}] n=${n_tr}  ${spe} steps/ep  epochs=${ep}  (=$(( spe * ep )) steps)  val_every=${ve}  @ $(date)"
 
   ( TORCHINDUCTOR_CACHE_DIR="${exp}/torchinductor" TRITON_CACHE_DIR="${exp}/triton" \
     torchrun --nproc_per_node=${NG} --nnodes=1 --node_rank=0 \
@@ -125,7 +130,7 @@ for n in ${SIZES}; do
         --train_csv "${tr}" --valid_csv "${VA}" --test_csv "${TE}" \
         --data_dir "${DATA_DIR}" --output_dir "${OUT}" --run_name "${name}" \
         --target dx --label_map "${LABEL_MAP}" --class_weighted \
-        --batch_size "${BS}" --num_workers "${NW}" --epochs "${ep}" \
+        --batch_size "${BS}" --num_workers "${NW}" --epochs "${ep}" --val_every "${ve}" \
         --lr "${LR}" --weight_decay "${WD}" --dropout "${DROPOUT}" \
       >> "${exp}/logs/${name}_${SLURM_JOB_ID}.log" 2>&1 ) &
   CHILD=$!

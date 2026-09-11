@@ -185,6 +185,12 @@ def main(args: argparse.Namespace) -> None:
             n += x.size(0)
         scheduler.step()
 
+        if (epoch + 1) % args.val_every and epoch + 1 != args.epochs:
+            # Not a validation epoch. At small n an epoch is a handful of steps, and
+            # validating every one of hundreds of epochs costs more than the training.
+            # last.pt is written at validation epochs, so a requeue loses at most
+            # val_every epochs.
+            continue
         metrics = evaluate(model.module if world_size > 1 else model, val_loader,
                            device, num_classes)
         if is_main:
@@ -246,6 +252,8 @@ def parse_args() -> argparse.Namespace:
                    help="Root for --valid_csv/--test_csv; defaults to --data_dir. Set it when "
                         "training on synthetic volumes, which live under a different root.")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--val_every", type=int, default=1,
+                   help="Validate (and checkpoint) every N epochs; the last epoch always validates.")
     p.add_argument("--output_dir", required=True)
     p.add_argument("--run_name", required=True)
 
