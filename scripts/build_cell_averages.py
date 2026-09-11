@@ -9,19 +9,34 @@ without covering any single cell, while the macro-average charges it for every c
 equally. Both are legitimate; they answer different questions. Column names here
 carry the `macro_` prefix so a reader cannot mistake one for the other.
 
-WHY `cell_set` HAS AN ex_brats ROW. BraTS is the only pathological cohort, and it
-is an outlier in GENERATION but not in RECONSTRUCTION — brats gen inception FID is
-75.8 (T1) against ukb_T1's 8.9, while brats RECON beats the corpus average on every
-perceptual metric (PSNR 33.7-34.0 vs 32.2-32.4, LPIPS 0.024-0.026 vs 0.025-0.027).
-So the VAE encodes and decodes tumours fine and the diffusion prior cannot generate
-them. An all-cell macro-average buries that: one cell at 75.8 moves a 13-cell mean
-by ~5 points on its own. The ex_brats row isolates the healthy-brain regime so the
-data-quantity trend is readable, and the pair of rows makes the pathology gap a
-number rather than a caveat.
+THE THREE `cell_set` ROWS, and which one the paper quotes.
 
-DO NOT report ex_brats alone. Dropping the only pathological cohort because it is
-hard is the same move as picking whichever decoder wins, and the tumour-segmentation
-augmentation arm depends on exactly the volumes this would hide.
+Rows here, `*_ex_brats` / `*_4co` COLUMNS in sheet 03. The shapes differ because
+the sheets do: 03 reports one pooled FID per slice, so a restriction is a second
+measurement of the same row and sits beside it; 05/06 macro-average a varying
+number of cells, so `n_cells` changes with the restriction and it has to be a row.
+
+  all       13 cells, the full cell_set.
+  ex_brats  10 cells. BraTS is the only TUMOUR cohort (ADNI and OASIS are also
+            pathological — dementia — and stay in every row). It is an outlier in
+            GENERATION but not in RECONSTRUCTION: brats gen inception FID is 75.8
+            (T1) against ukb_T1's 8.9, while brats RECON beats the cell_set average
+            on every perceptual metric (PSNR 33.7-34.0 vs 32.2-32.4, LPIPS
+            0.024-0.026 vs 0.025-0.027). So the VAE encodes and decodes tumours
+            fine and the diffusion prior cannot generate them. One cell at 75.8
+            moves a 13-cell mean by ~5 points on its own, which buries the
+            data-quantity trend in the remaining cells.
+  4co       8 cells: ukb, adni, ixi, oasis. The reported cell_set (decided
+            2026-09-09). HCP additionally leaves because it is the cell_set's
+            distributional extreme — young adults at 0.7mm, T1/T2 only — and it is
+            43.8% of the T2 slice once BraTS is out, so T2 conclusions are really
+            HCP conclusions.
+
+BraTS re-enters if ControlNet generation fixes the tumour cells; that decision is
+open, and until it closes the `all` row must keep being produced. Never quote a
+restricted row without its n_cells: dropping the hard cells and dropping the losing
+decoder are the same move, and the restriction has to be argued from the cell_set
+definition rather than from which arm it favours.
 
 Usage:  python3 scripts/build_cell_averages.py
 """
@@ -49,7 +64,11 @@ def macro(src: str, keys: list[str], metrics: list[str], out: str) -> None:
     df = pd.read_csv(f"{JP}/{src}")
     have = [m for m in metrics if m in df.columns]
     rows = []
-    for label, sub in (("all", df), ("ex_brats", df[df["cohort"] != "brats"])):
+    # 4co drops hcp on top of brats; see the module docstring for why each goes.
+    cell_sets = (("all", df),
+                 ("ex_brats", df[df["cohort"] != "brats"]),
+                 ("4co", df[~df["cohort"].isin(["brats", "hcp"])]))
+    for label, sub in cell_sets:
         # Rows whose metric block is entirely empty are separate measurement sets
         # (00 keeps LPIPS/PSNR rows apart from FID rows because their checkpoints
         # differ), so average each metric over the rows that actually carry it
