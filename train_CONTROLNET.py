@@ -186,15 +186,41 @@ def build_controlnet_file_list(filenames, embedding_base_dir, mask_dir,
     return files
 
 
-def prepare_controlnet_transform(include_body_region: bool = False) -> Compose:
-    """train_UNET.prepare_transform + extra LoadImaged on the 'label' (mask)."""
-    base = prepare_transform(include_body_region=include_body_region)
+def prepare_controlnet_transform(include_body_region: bool = False, cond_attributes=None,
+                                 include_spacing: bool = True) -> Compose:
+    """train_UNET.prepare_transform + extra LoadImaged on the 'label' (mask).
+
+    cond_attributes / include_spacing MUST be forwarded. Without them
+    prepare_transform takes its legacy branch, which reads ``cond`` as a flat list
+    and indexes ``cond[0]`` -- the MIUA scalar-age path. Pooled embedding jsons
+    carry a typed token-set dict there, so job 266590 died on its first batch with
+    ``TypeError: new(): data must be a sequence (got dict)``.
+    """
+    base = prepare_transform(include_body_region=include_body_region,
+                             cond_attributes=cond_attributes,
+                             include_spacing=include_spacing)
     # Compose chains the existing transforms; just append mask-loading ops.
     extra = [
         monai.transforms.LoadImaged(keys=["label"]),
         monai.transforms.EnsureChannelFirstd(keys=["label"]),
     ]
     return Compose(list(base.transforms) + extra)
+
+
+def _meta_from_batch(batch, use_token_set: bool, device):
+    """Conditioning for the frozen UNet, in the form train_UNET.py trained it on.
+
+    Token-set: the fixed-slot dict TokenSetCondLoader emits. No CFG presence
+    dropout here -- that is a UNet-training regulariser; the ControlNet is fit
+    against the fully conditioned model and guidance happens at sampling.
+    """
+    if use_token_set:
+        return {
+            "cond_cat": batch["cond_cat"].to(device, non_blocking=True),
+            "cond_cont": batch["cond_cont"].to(device, non_blocking=True),
+            "cond_presence": batch["cond_presence"].to(device, non_blocking=True),
+        }
+    return batch["cond"].to(device, non_blocking=True)
 
 
 # ---------------------------------------------------------------------------
@@ -269,13 +295,27 @@ def main():
     noise_scheduler = define_instance(args, "noise_scheduler")
     include_body_region = unet.include_top_region_index_input
     include_modality = unet.num_class_embeds is not None
+    # Mirror train_UNET.py exactly: the frozen UNet decides both. Pooled is
+    # token-set conditioned with spacing OFF (include_spacing_input=false), so
+    # passing a spacing tensor or a flat cond tensor would not match what it was
+    # trained on.
+    include_spacing = unet.include_spacing_input
+    cond_cfg = getattr(args, "conditioning", None)
+    use_token_set = bool(cond_cfg) and bool(cond_cfg.get("enabled", False))
+    if rank == 0:
+        print(f"[Cond] use_token_set={use_token_set} include_spacing={include_spacing}", flush=True)
     num_train_timesteps = args.noise_scheduler["num_train_timesteps"]
 
     # ------------------------------------------------------------------
     # Data — embeddings (cond + mask via 'label' key)
     # ------------------------------------------------------------------
     filenames_train = load_filenames(train_json, "training", adapter)
-    filenames_valid = load_filenames(valid_json, "validation", adapter)[:args.num_valid]
+    # NOT truncated here. The pooled valid list is cohort-ordered and ukb-first, so
+    # [:num_valid] before mask matching kept 50 ukb names, matched none, and job
+    # 266590 reported "valid: 0". With zero batches avg_val is 0.0, which beats inf
+    # at the first validation and is never beaten again -- best-checkpoint would have
+    # frozen at step 2500 for the whole run. Match first, truncate after.
+    filenames_valid = load_filenames(valid_json, "validation", adapter)
 
     # Build subject_id → rel_path_seg lookup from BraTS CSV.
     train_label_df = pd.read_csv(args.train_label_dir)
@@ -289,10 +329,23 @@ def main():
     valid_files = build_controlnet_file_list(filenames_valid, embedding_base_dir,
                                               args.data_dir, mask_lookup_valid,
                                               include_body_region)
+    # Evenly spaced, not a head slice: the matched list is modality-blocked
+    # (126 T1, then T2, then FLAIR), so [:num_valid] is all T1 and best-checkpoint
+    # would be picked on one modality. A fixed stride keeps it deterministic.
+    if len(valid_files) > args.num_valid:
+        stride = len(valid_files) // args.num_valid
+        valid_files = valid_files[::stride][:args.num_valid]
+    if not valid_files:
+        raise RuntimeError("no validation volume matched the mask CSV -- best-checkpoint "
+                           "selection would be meaningless (avg_val=0 forever)")
     if rank == 0:
         print(f"Total training: {len(train_files)} valid: {len(valid_files)}", flush=True)
 
-    data_transform = prepare_controlnet_transform(include_body_region=include_body_region)
+    data_transform = prepare_controlnet_transform(
+        include_body_region=include_body_region,
+        cond_attributes=cond_cfg["attributes"] if use_token_set else None,
+        include_spacing=include_spacing,
+    )
 
     workers_per_gpu = args.cpus_per_task // world_size
     train_dataset = CacheDataset(data=train_files, transform=data_transform,
@@ -378,8 +431,8 @@ def main():
         batch = next(train_iter)
         images = (batch["image"].to(device, non_blocking=True).contiguous() - global_mean) * scale_factor
         labels = batch["label"].to(device, non_blocking=True)
-        spacing_tensor = batch["spacing"].to(device, non_blocking=True)
-        meta_tensor = batch["cond"].to(device, non_blocking=True)
+        spacing_tensor = batch["spacing"].to(device, non_blocking=True) if include_spacing else None
+        meta_tensor = _meta_from_batch(batch, use_token_set, device)
 
         # Match mask spatial to latent. Down to {latent_shape} via nearest;
         # ControlNet's conditioning_embedding then handles the in-network
@@ -493,8 +546,8 @@ def main():
                 for vb in valid_loader:
                     v_images = (vb["image"].to(device, non_blocking=True) - global_mean) * scale_factor
                     v_labels = vb["label"].to(device, non_blocking=True)
-                    v_spacing = vb["spacing"].to(device, non_blocking=True)
-                    v_meta = vb["cond"].to(device, non_blocking=True)
+                    v_spacing = vb["spacing"].to(device, non_blocking=True) if include_spacing else None
+                    v_meta = _meta_from_batch(vb, use_token_set, device)
                     v_labels_r = F.interpolate(v_labels, size=v_images.shape[2:], mode="nearest")
                     v_cond = binarize_labels(v_labels_r, num_classes=num_mask_classes)
                     with autocast(device_type="cuda", dtype=torch.float16, enabled=args.amp):
