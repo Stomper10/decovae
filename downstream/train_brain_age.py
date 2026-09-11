@@ -62,10 +62,22 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> dict
     return {"mae": mae, "rmse": rmse, "r2": r2, "n": int(len(targets))}
 
 
+def _seed_everything(seed: int) -> None:
+    import random
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+
 def main(args: argparse.Namespace) -> None:
     rank, world_size, local_rank = _setup_ddp()
     device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
     is_main = rank == 0
+    _seed_everything(args.seed)
+    # Validation / test are always REAL; training may be synthetic, which lives under
+    # a different root. One --data_dir could not serve both.
+    eval_dir = args.eval_data_dir or args.data_dir
 
     with open(args.dataset_config_path) as f:
         ds_cfg = json.load(f)
@@ -81,34 +93,58 @@ def main(args: argparse.Namespace) -> None:
                             orientation_axcodes=ds_cfg.get("orientation_axcodes", "RAS"),
                             cache_rate=args.cache_rate)
     val_ds = make_dataset(real_csv=args.valid_csv,
-                          data_dir=args.data_dir,
+                          data_dir=eval_dir,
                           resolution=resolution,
                           orientation_axcodes=ds_cfg.get("orientation_axcodes", "RAS"),
                           cache_rate=args.cache_rate)
 
-    train_sampler = DistributedSampler(train_ds) if world_size > 1 else None
+    train_sampler = DistributedSampler(train_ds, seed=args.seed) if world_size > 1 else None
     train_loader = DataLoader(train_ds, batch_size=args.batch_size,
                               shuffle=(train_sampler is None), sampler=train_sampler,
-                              num_workers=args.num_workers, pin_memory=True, drop_last=True)
+                              num_workers=args.num_workers, pin_memory=True, drop_last=True,
+                              generator=torch.Generator().manual_seed(args.seed))
     val_loader = DataLoader(val_ds, batch_size=args.batch_size,
                             shuffle=False, num_workers=args.num_workers, pin_memory=True)
 
-    model = build_sfcn(in_channels=1, dropout=args.dropout).to(device)
+    out_dir = Path(args.output_dir) / args.run_name
+    ckpt_dir = out_dir / "weights"
+    if is_main:
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+    last_fp = ckpt_dir / "last.pt"
+    # Resume from the last completed epoch. Without this a walltime cut or a SIGUSR1
+    # requeue restarted at epoch 0 and APPENDED to history.jsonl -- how one TSTR run
+    # reported 17 epochs and another stopped at 13.
+    resume = torch.load(last_fp, map_location="cpu", weights_only=False) if last_fp.is_file() else None
+
+    model = build_sfcn(in_channels=1, dropout=args.dropout)
+    if resume is not None:
+        model.load_state_dict(resume["model"])
+    model = model.to(device)
     if world_size > 1:
         model = DDP(model, device_ids=[local_rank])
     optim = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optim, T_max=args.epochs)
     loss_fn = nn.L1Loss()  # MAE; replace with MSE / soft-label-KL if pursuing original SFCN later
+    start_epoch, best_mae = 0, float("inf")
+    if resume is not None:
+        optim.load_state_dict(resume["optim"])
+        scheduler.load_state_dict(resume["scheduler"])
+        start_epoch, best_mae = resume["epoch"] + 1, resume["best_mae"]
 
     if is_main:
-        out_dir = Path(args.output_dir) / args.run_name
-        out_dir.mkdir(parents=True, exist_ok=True)
-        ckpt_dir = out_dir / "weights"
-        ckpt_dir.mkdir(exist_ok=True)
-        best_mae = float("inf")
         history: list[dict] = []
+        if resume is None:
+            open(out_dir / "history.jsonl", "w").close()
+            with open(out_dir / "run_meta.json", "w") as f:
+                json.dump({"seed": args.seed, "epochs": args.epochs,
+                           "train_csv": args.train_csv, "n_train": len(train_ds),
+                           "valid_csv": args.valid_csv, "n_valid": len(val_ds),
+                           "test_csv": args.test_csv,
+                           "data_dir": args.data_dir, "eval_data_dir": eval_dir}, f, indent=2)
+        print(f"[run] seed={args.seed} n_train={len(train_ds)} n_valid={len(val_ds)} "
+              f"start_epoch={start_epoch}/{args.epochs}", flush=True)
 
-    for epoch in range(args.epochs):
+    for epoch in range(start_epoch, args.epochs):
         if train_sampler is not None:
             train_sampler.set_epoch(epoch)
         model.train()
@@ -139,6 +175,30 @@ def main(args: argparse.Namespace) -> None:
                 torch.save({"model": (model.module if world_size > 1 else model).state_dict(),
                             "epoch": epoch, "val_mae": metrics["mae"]},
                            ckpt_dir / "best.pt")
+            torch.save({"model": (model.module if world_size > 1 else model).state_dict(),
+                        "optim": optim.state_dict(), "scheduler": scheduler.state_dict(),
+                        "epoch": epoch, "best_mae": best_mae, "seed": args.seed}, last_fp)
+
+    # ---- final: score the SELECTED checkpoint on the held-out test set ----
+    # Selection uses validation, so reporting validation would report the maximum
+    # over epochs. Test is read once, here.
+    if args.test_csv and is_main:
+        import copy
+        test_ds = make_dataset(real_csv=args.test_csv, data_dir=eval_dir,
+                               resolution=resolution,
+                               orientation_axcodes=ds_cfg.get("orientation_axcodes", "RAS"),
+                               cache_rate=args.cache_rate)
+        test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False,
+                                 num_workers=args.num_workers, pin_memory=True)
+        best = torch.load(ckpt_dir / "best.pt", map_location="cpu", weights_only=False)
+        eval_model = copy.deepcopy(model.module if world_size > 1 else model)
+        eval_model.load_state_dict(best["model"])
+        eval_model.eval().to(device)
+        row = {"split": "test", "from_epoch": best["epoch"], "seed": args.seed,
+               **evaluate(eval_model, test_loader, device)}
+        print(json.dumps(row), flush=True)
+        with open(out_dir / "test_metrics.json", "w") as f:
+            json.dump(row, f, indent=2)
 
     _cleanup_ddp()
 
@@ -149,6 +209,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--train_csv", required=True)
     p.add_argument("--valid_csv", required=True)
     p.add_argument("--data_dir", required=True)
+    p.add_argument("--eval_data_dir", default=None,
+                   help="Root for --valid_csv/--test_csv; defaults to --data_dir. Set it when "
+                        "training on synthetic volumes, which live under a different root.")
+    p.add_argument("--test_csv", default=None,
+                   help="Held-out real test set, scored once at the end with best.pt.")
+    p.add_argument("--seed", type=int, default=0)
     p.add_argument("--output_dir", required=True)
     p.add_argument("--run_name", required=True)
 
