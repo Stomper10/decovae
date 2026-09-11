@@ -57,7 +57,39 @@ N_CELL="${N_CELL:-500}"
 # models whose SSIM was 0.315 vs 0.966. Inception r=0.4 is the ranking metric
 # (rho=+0.70 vs the paired-metric consensus over 66 points); swav/dino/rad r=0.4
 # ride along as a panel and must not drive the ranking.
-EXTS=(inception swav dinov2)
+# Overridable so a sweep can run rad + inception only: rad rides on J1 (gen_env),
+# so EXTS="inception" gives exactly those two.
+read -r -a EXTS <<< "${EXTS:-inception swav dinov2}"
+
+# swav/dinov2 read their weights through ${VAR:?} inside $(ext_env ...). A failed
+# expansion inside a command substitution does NOT stop the script under set -e:
+# it prints "SWAV_WEIGHT: set SWAV_WEIGHT" and carries on submitting jobs whose env
+# lacks the weight path, which then fail on the cluster. Check up front instead.
+for e in "${EXTS[@]}"; do
+  case "${e}" in
+    swav)   [[ -n "${SWAV_WEIGHT:-}" ]] || { echo "[FATAL] EXTS has swav but SWAV_WEIGHT is unset" >&2; exit 1; } ;;
+    dinov2) [[ -n "${DINO_REPO:-}" && -n "${DINO_WEIGHT:-}" ]] || { echo "[FATAL] EXTS has dinov2 but DINO_REPO/DINO_WEIGHT unset" >&2; exit 1; } ;;
+  esac
+done
+
+# FID_R is fixed at 0.4. compute_metric.sh silently defaults to 1.0 when the env is
+# missing, and r=1.0 is quality-blind -- results_pooled_guidance.csv came back with
+# rad at ~21 (r=1.0 scale) on some rows and ~5 on others. Refuse anything else
+# unless it is a deliberate choice.
+if [[ "${FID_R}" != "0.4" && "${ALLOW_FID_R:-0}" != "1" ]]; then
+  echo "[FATAL] FID_R=${FID_R}; the reporting ratio is 0.4 (set ALLOW_FID_R=1 to override)" >&2
+  exit 1
+fi
+
+# An *-Acfg UNet has a 19-D conditioning input; building it from model_fm.json
+# fails at load_state_dict(strict=True). compute_metric.sh defaults to that file,
+# so the cohort config has to be named, and passed explicitly on every job below.
+for a in ${ARMS}; do
+  if [[ "${a}" == *-Acfg && "${MODEL_CFG:-}" != "configs/pooled/model_fm_cohort.json" ]]; then
+    echo "[FATAL] ${a} is A-config; set MODEL_CFG=configs/pooled/model_fm_cohort.json" >&2
+    exit 1
+  fi
+done
 gen_env() { echo "PHASE=all FID_MODEL_NAME=radimagenet_resnet50 FID_CENTER_SLICES_RATIO=${FID_R}"; }
 ext_env() {
   case "$1" in
@@ -86,14 +118,14 @@ row() {   # row <arm> <slice> <n> <guidance> <extra_env...>
   local arm="$1" slice="$2" n="$3" g="$4"; shift 4
   local csv="${SLICE_DIR}/${slice}.csv"
   [[ -f "${csv}" ]] || { echo "[skip] missing ${csv} (run scripts/build_gfid_slices.py)"; return; }
-  local short; short="$(sed -e 's/^pooled-//' -e 's/-kl8e4-eff32-s1$//' <<<"${arm}")"
+  local short; short="$(sed -e 's/^pooled-//' -e 's/-kl8e4-eff32-s1\(-Acfg\)\{0,1\}$/\1/' <<<"${arm}")"
   n_rows=$((n_rows+1))
   echo "[row] ${short}  ${slice}  n=${n}  g=${g}"
   local common="EXP_NAME=${arm} STAGE=stage1 DATASET=pooled \
 VAE_CKPT_NAME=${VAE_CKPT} UNET_CKPT_NAME=${UNET_CKPT} \
 EVAL_MODE=real_vs_gen NUM_IMAGES=${n} GUIDANCE_SCALE=${g} \
 BASE_CSV=${csv} CELL= OUT_TAG=${slice} FID_BOOTSTRAP=${BOOT} \
-POSTFIX=gf_${short} $*"
+POSTFIX=gf_${short} ${MODEL_CFG:+MODEL_CFG=${MODEL_CFG}} $*"
   local jid; jid=$(submit "" ${common} $(gen_env)); n_jobs=$((n_jobs+1))
   echo "    J1 gen + rad r=${FID_R}   jid=${jid}"
   for e in "${EXTS[@]}"; do
