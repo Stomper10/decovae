@@ -7,11 +7,13 @@
 #   sbatch train_3d_meddiff_phase4.sh
 #   RESUME_CKPT=/abs/path.pt sbatch train_3d_meddiff_phase4.sh
 #
-# HEADER COPIED FROM train_3d_meddiff.sh, THE 3DMD LINEAGE. Taking the ADH/SEG packs
-# as a template instead put four wrong directives into the Phase 2+3 pack -- partition,
-# gres, ntasks-per-node and cpus-per-task -- and ntasks-per-node was the one that would
-# have hung rather than failed. Phase 4 is DDP under srun exactly like Phase 1, so it
-# wants the same ntasks-per-node=8.
+# LAUNCH = srun (1 task) -> torchrun (8 procs), NOT srun python x8. Phases 1-2 run
+# under Lightning, which reads SLURM_PROCID itself, so ntasks-per-node=8 works there.
+# BiFlowNet is plain torch DDP: dist.init_process_group("nccl") with env:// needs
+# RANK/WORLD_SIZE, which only torchrun sets. Copying Phase 1's ntasks-per-node=8 is
+# what killed job 266382 -- all 8 ranks died at init with "environment variable RANK
+# expected, but not set". Upstream's README launches it with torchrun too; the header
+# and srun line below follow train_VAE.sh, the repo's torchrun-under-srun template.
 #
 # CONDITIONING. Phase 4 IS conditional, on a single categorical drawn from the data
 # json's KEYS (Singleres_dataset hands `int(key)` to the model as cls_idx). We use
@@ -29,9 +31,9 @@
 #SBATCH --account=gpu
 #SBATCH --partition=gpu-8farm
 #SBATCH --nodes=1
-#SBATCH --ntasks-per-node=8
+#SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:h100:8
-#SBATCH --cpus-per-task=14
+#SBATCH --cpus-per-task=112
 #SBATCH --time=1-00:00:00
 #SBATCH --signal=B:SIGUSR1@300
 #SBATCH --requeue
@@ -126,7 +128,15 @@ else
   echo "  resume      : (none — fresh start)"
 fi
 
-srun python external/3d_meddiff/train/train_BiFlowNet_SingleRes.py \
+NPROC_PER_NODE=8
+srun --cpu-bind=none,v --accel-bind=g torchrun \
+    --nproc_per_node=${NPROC_PER_NODE} \
+    --nnodes=$SLURM_NNODES \
+    --node_rank=$SLURM_NODEID \
+    --rdzv_id=$SLURM_JOB_ID \
+    --rdzv_backend=c10d \
+    --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
+  external/3d_meddiff/train/train_BiFlowNet_SingleRes.py \
     --data-path "${DATA_JSON}" \
     --results-dir "${RESULTS_DIR}" \
     --AE-ckpt "${AE_CKPT}" \
@@ -136,7 +146,7 @@ srun python external/3d_meddiff/train/train_BiFlowNet_SingleRes.py \
     --batch-size "${BATCH_SIZE}" \
     --epochs "${EPOCHS}" \
     --ckpt-every "${CKPT_EVERY}" \
-    --num-workers "${SLURM_CPUS_PER_TASK:-8}" \
+    --num-workers "$(( ${SLURM_CPUS_PER_TASK:-112} / NPROC_PER_NODE ))" \
     ${CKPT_ARG} &
 wait
 exit 0
