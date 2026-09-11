@@ -53,8 +53,10 @@ conda activate 3d_meddiff
 : "${RESOLUTION:=48 48 48}"    # our latent grid; upstream default 32 is wrong here
 : "${VOLUME_CHANNELS:=8}"
 : "${BATCH_SIZE:=16}"
-: "${EPOCHS:=1000}"
-: "${CKPT_EVERY:=500}"
+: "${STEP_BUDGET:=250000}"     # = our diffusion UNet's 250k steps; EPOCHS is derived from it below
+: "${EPOCHS:=}"                 # set explicitly only to override the budget
+: "${CKPT_EVERY:=5000}"         # each checkpoint also samples + decodes a volume on rank 0
+: "${KEEP_EVERY:=25000}"        # milestones kept for the checkpoint sweep (needs biflownet_keep_milestones.patch)
 : "${RESUME_CKPT:=}"
 
 EXP_ROOT="/data/wonyoungjang/decodata/3d_meddiff/${EXP_NAME}"
@@ -103,6 +105,23 @@ if len(d) != ${NUM_CLASSES}:
     sys.exit(f'[FATAL] json has {len(d)} classes, NUM_CLASSES=${NUM_CLASSES}')
 print(f'  json classes: {sorted(d)}')" || exit 1
 
+# STEP BUDGET. Upstream trains 1000 epochs with no step limit, and its DataLoader has no
+# DistributedSampler: every rank walks the FULL latent set, so one epoch is
+# ceil(N / batch_size) steps, not N / (batch_size * gpus). On 51,169 latents that is
+# 3,199 steps -- 1000 epochs would be ~3.2M steps and would hold the one AIBIO GPU slot
+# for weeks. The budget matches our UNet; checkpoints every CKPT_EVERY with milestones
+# every KEEP_EVERY kept, so the endpoint is not assumed to be the best (it was not for
+# the VAE or for 3DMD Phase 2).
+if [[ -z "${EPOCHS}" ]]; then
+  EPOCHS=$(python3 -c "
+import json, math, os
+d = json.load(open('${DATA_JSON}'))
+n = sum(len(os.listdir(v + '_latents')) for v in d.values())   # Singleres_dataset appends _latents
+spe = math.ceil(n / ${BATCH_SIZE})
+print(math.ceil(${STEP_BUDGET} / spe))") || { echo "[FATAL] could not derive EPOCHS"; exit 1; }
+fi
+echo "  step budget : ${STEP_BUDGET} -> epochs ${EPOCHS}  ckpt_every ${CKPT_EVERY}  keep_every ${KEEP_EVERY}"
+
 export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n1)
 export MASTER_PORT=$((10000 + RANDOM % 50000))
 export OMP_NUM_THREADS=1
@@ -146,6 +165,7 @@ srun --cpu-bind=none,v --accel-bind=g torchrun \
     --batch-size "${BATCH_SIZE}" \
     --epochs "${EPOCHS}" \
     --ckpt-every "${CKPT_EVERY}" \
+    --keep-every "${KEEP_EVERY}" \
     --num-workers "$(( ${SLURM_CPUS_PER_TASK:-112} / NPROC_PER_NODE ))" \
     ${CKPT_ARG} &
 wait

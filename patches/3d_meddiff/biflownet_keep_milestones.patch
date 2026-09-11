@@ -1,0 +1,28 @@
+--- a/train/train_BiFlowNet_SingleRes.py
++++ b/train/train_BiFlowNet_SingleRes.py
+@@ -296,8 +296,14 @@
+                     checkpoint_path = f"{checkpoint_dir}/{train_steps:07d}.pt"
+                     torch.save(checkpoint, checkpoint_path)
+                     logger.info(f"Saved checkpoint to {checkpoint_path}")
+-                    if len(os.listdir(checkpoint_dir))>6:
+-                        os.remove(f"{checkpoint_dir}/{train_steps-6*args.ckpt_every:07d}.pt")
++                    # DecoVAE: keep every --keep-every milestone so the run can be swept for
++                    # its best checkpoint; only rolling checkpoints older than the last 6 go.
++                    # Upstream deleted by count, so at most 6 x ckpt_every steps survived.
++                    old_step = train_steps - 6 * args.ckpt_every
++                    old_path = f"{checkpoint_dir}/{old_step:07d}.pt"
++                    if old_step > 0 and os.path.exists(old_path) and not (
++                            args.keep_every > 0 and old_step % args.keep_every == 0):
++                        os.remove(old_path)
+                     with torch.no_grad():
+                         milestone = train_steps // args.ckpt_every
+                         
+@@ -355,6 +361,8 @@
+     parser.add_argument('--resolution', nargs='+', type=int, default=[32, 32, 32])
+     parser.add_argument("--log-every", type=int, default=50)
+     parser.add_argument("--ckpt-every", type=int, default=500)
++    parser.add_argument("--keep-every", type=int, default=0,
++                        help="DecoVAE: never delete checkpoints at multiples of this step (0 = upstream behaviour).")
+     parser.add_argument("--ckpt", type=str, default=None)
+     parser.add_argument("--vq-size", type=int, default=64)
+     args = parser.parse_args()
