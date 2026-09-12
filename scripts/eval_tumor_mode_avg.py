@@ -166,7 +166,11 @@ def iter_cases(args) -> list[tuple[str, dict]]:
         return out
     else:
         gen = Path(args.gen_dir)
-        files = sorted(gen.glob("*.nii.gz"))
+        # gen_* ONLY. A generation cell's volumes/ also holds base_*.nii.gz -- the real
+        # FID reference that compute_metric.sh saves with --save_real -- and "*.nii.gz"
+        # scored all 500 of them as if they were generated, so every gen source in
+        # journal_plan/tumor_mode/ was 500 real + 500 generated.
+        files = sorted(gen.glob("gen_*.nii.gz"))
         if args.max_cases > 0:
             files = files[: args.max_cases]
         return [(f.name.replace(".nii.gz", ""), {"image": str(f)}) for f in files]

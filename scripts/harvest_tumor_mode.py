@@ -70,11 +70,29 @@ def harvest_tumor_mode() -> int:
         ]
 
     rows_out = []
+    sources = []
+    pooled_real = None
     for src in sorted(TM_DIR.glob("*.csv")):
         with src.open() as f:
             per = list(csv.DictReader(f))
+        # Gen CSVs made before eval_tumor_mode_avg.py globbed gen_* only hold base_*
+        # rows too: the real FID reference saved in the same volumes/ dir. Score the
+        # generated rows alone, and keep the base_* rows once as their own source --
+        # they are real BraTS FLAIR in the true pooled frame (rigid MNI), identical in
+        # every cell, which real.csv (center-crop frame) is not.
+        gen = [r for r in per if r.get("case", "").startswith("gen_")]
+        base = [r for r in per if r.get("case", "").startswith("base_")]
+        if gen:
+            if base and pooled_real is None:
+                pooled_real = base
+            per = gen
+        sources.append((src.stem, per))
+    if pooled_real is not None:
+        sources.append(("real_pooled_frame_base", pooled_real))
+
+    for stem, per in sources:
         n = len(per)
-        row = {"source": src.stem, "n": n}
+        row = {"source": stem, "n": n}
         det_any = sum(1 for r in per if r.get("any_detected") == "1")
         row["any_detected_pct"] = f"{100 * det_any / max(n, 1):.2f}"
         for reg in REGIONS:
